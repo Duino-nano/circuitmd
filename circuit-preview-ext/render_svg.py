@@ -13,9 +13,41 @@ import math
 import re
 import sys
 import traceback
+import unicodedata
 
 AUTO_PREFIX_RE = re.compile(r"^(elm|logic|flow|dsp)\.|^\(")
 TITLE_RE = re.compile(r"^title:\s*(.*)$")
+SVG_VIEWBOX_RE = re.compile(r'viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+)"')
+
+
+def patch_cjk_width():
+    """schemdrawの文字幅推定をCJK対応にする（circuitmd.py と同一内容）。"""
+    from schemdraw.backends import svgtext
+
+    if getattr(svgtext, "_cjk_patched", False):
+        return
+    orig = svgtext.string_width
+
+    def string_width_cjk(st, fontsize=12, font="Arial"):
+        base = orig(st, fontsize, font)
+        wide = sum(1 for ch in st if unicodedata.east_asian_width(ch) in ("W", "F"))
+        return base + wide * fontsize * 0.55
+
+    svgtext.string_width = string_width_cjk
+    svgtext._cjk_patched = True
+
+
+def add_svg_margin(svg, margin=10.0):
+    """SVGのviewBoxを上下左右に広げ、端ぎりぎりのラベル切れを防ぐ（単位: pt）。"""
+    m = SVG_VIEWBOX_RE.search(svg)
+    if not m:
+        return svg
+    x, y, w, h = (float(v) for v in m.groups())
+    x, y, w, h = x - margin, y - margin, w + 2 * margin, h + 2 * margin
+    svg = svg[: m.start()] + f'viewBox="{x} {y} {w} {h}"' + svg[m.end() :]
+    svg = re.sub(r'width="[\d.]+pt"', f'width="{w}pt"', svg, count=1)
+    svg = re.sub(r'height="[\d.]+pt"', f'height="{h}pt"', svg, count=1)
+    return svg
 
 # ---- 簡易DSL（circuitmd.py と同一内容） ----
 DSL_COMPONENTS = {
@@ -52,7 +84,7 @@ DSL_DIRECTIONS = {
 DSL_LOC = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
 DSL_PUSH = {"分岐", "push"}
 DSL_POP = {"合流", "戻る", "pop"}
-DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy)=(.+)$")
+DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy|ofst)=(.+)$")
 IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
 
@@ -81,6 +113,7 @@ def translate_dsl(line):
     calls = []
     label_parts = []
     label_loc = None
+    label_ofst = None
     for tok in tokens[1:]:
         m = DSL_OPT_RE.match(tok)
         if tok in DSL_DIRECTIONS:
@@ -97,6 +130,8 @@ def translate_dsl(line):
                 calls.append(f".length({val})")
             elif key == "loc":
                 label_loc = DSL_LOC.get(val, val)
+            elif key == "ofst":  # ラベルを線から離す。数値 or (x,y)（スペースなし）
+                label_ofst = val
             else:  # tox / toy
                 calls.append(f".{key}({_dsl_ref(val)})")
         else:
@@ -105,7 +140,8 @@ def translate_dsl(line):
     if label_parts:
         text = " ".join(label_parts).replace("'", "\\'")
         loc_arg = f", loc='{label_loc}'" if label_loc else ""
-        calls.append(f".label('{text}'{loc_arg})")
+        ofst_arg = f", ofst={label_ofst}" if label_ofst else ""
+        calls.append(f".label('{text}'{loc_arg}{ofst_arg})")
         if not name and IDENT_RE.match(label_parts[0]) and label_parts[0] not in RESERVED_NAMES:
             name = label_parts[0]
 
@@ -145,6 +181,7 @@ def main():
         sys.exit("schemdraw が見つかりません: pip3 install --break-system-packages schemdraw")
     schemdraw.use("svg")
     schemdraw.config(bgcolor="white")
+    patch_cjk_width()
     from schemdraw import dsp, elements as elm, flow, logic
 
     d = schemdraw.Drawing()
@@ -177,7 +214,7 @@ def main():
     d = ns["d"]
     if not getattr(d, "elements", None):
         sys.exit("要素が0個です")
-    sys.stdout.write(d.get_imagedata("svg").decode("utf-8"))
+    sys.stdout.write(add_svg_margin(d.get_imagedata("svg").decode("utf-8")))
 
 
 main()

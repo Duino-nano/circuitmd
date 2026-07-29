@@ -22,7 +22,8 @@ mdと同じディレクトリの circuits/ にSVGを生成し、フェンス直�
     - 簡易DSL行（推奨）: 「部品[:変数名] ラベル 方向 [@接続先] [オプション]」
         例: 抵抗 330Ω →  /  NPN Q1 loc=右  /  GND @Q1.emitter  /  分岐 ・ 合流
         方向: → ← ↑ ↓（right等・右左上下も可） 接続: @Q1.base や @(2,1.5)
-        オプション: loc=下 len=1.5 tox=@X.end toy=@Y.end rev(左右反転) flip(上下反転)
+        オプション: loc=下 len=1.5 tox=@X.end toy=@Y.end ofst=0.4(ラベルを線から離す)
+                    rev(左右反転) flip(上下反転)
         先頭ラベル語が英数字名（Q1等）なら変数になり @Q1.base で参照できる
     - elm. / logic. / flow. / dsp. で始まる行は自動で「d += 」が付く（1行=1要素）
     - それ以外は素のPythonとして実行される。DSL行と自由に混在できる
@@ -42,6 +43,7 @@ import math
 import re
 import sys
 import traceback
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,7 +89,7 @@ DSL_DIRECTIONS = {
 DSL_LOC = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
 DSL_PUSH = {"分岐", "push"}
 DSL_POP = {"合流", "戻る", "pop"}
-DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy)=(.+)$")
+DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy|ofst)=(.+)$")
 IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
 
@@ -117,6 +119,7 @@ def translate_dsl(line: str) -> str | None:
     calls: list[str] = []
     label_parts: list[str] = []
     label_loc = None
+    label_ofst = None
     for tok in tokens[1:]:
         m = DSL_OPT_RE.match(tok)
         if tok in DSL_DIRECTIONS:
@@ -133,6 +136,8 @@ def translate_dsl(line: str) -> str | None:
                 calls.append(f".length({val})")
             elif key == "loc":
                 label_loc = DSL_LOC.get(val, val)
+            elif key == "ofst":  # ラベルを線から離す。数値 or (x,y)（スペースなし）
+                label_ofst = val
             else:  # tox / toy
                 calls.append(f".{key}({_dsl_ref(val)})")
         else:
@@ -141,7 +146,8 @@ def translate_dsl(line: str) -> str | None:
     if label_parts:
         text = " ".join(label_parts).replace("'", "\\'")
         loc_arg = f", loc='{label_loc}'" if label_loc else ""
-        calls.append(f".label('{text}'{loc_arg})")
+        ofst_arg = f", ofst={label_ofst}" if label_ofst else ""
+        calls.append(f".label('{text}'{loc_arg}{ofst_arg})")
         # 先頭ラベル語が識別子なら変数名を兼ねる（例: NPN Q1 → 変数Q1）
         if not name and IDENT_RE.match(label_parts[0]) and label_parts[0] not in RESERVED_NAMES:
             name = label_parts[0]
@@ -251,6 +257,45 @@ def hash8(src: str) -> str:
     return hashlib.sha1(src.encode("utf-8")).hexdigest()[:8]
 
 
+def patch_cjk_width() -> None:
+    """schemdrawの文字幅推定をCJK対応にする。
+
+    svgtext.string_width() はASCII前提の文字幅テーブルで、全角文字を約45%に
+    過小評価する（フォールバック75/1000em相当）。このままだと日本語ラベルで
+    bboxが実際より狭く計算され、端のラベルが切れたり重なり判断がズレる。
+    全角(W)・広角(F)文字1つにつき不足分(約0.55em)を加算して補正する。
+    """
+    from schemdraw.backends import svgtext
+
+    if getattr(svgtext, "_cjk_patched", False):
+        return
+    orig = svgtext.string_width
+
+    def string_width_cjk(st, fontsize=12, font="Arial"):
+        base = orig(st, fontsize, font)
+        wide = sum(1 for ch in st if unicodedata.east_asian_width(ch) in ("W", "F"))
+        return base + wide * fontsize * 0.55
+
+    svgtext.string_width = string_width_cjk
+    svgtext._cjk_patched = True
+
+
+SVG_VIEWBOX_RE = re.compile(r'viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+)"')
+
+
+def add_svg_margin(svg: str, margin: float = 10.0) -> str:
+    """SVGのviewBoxを上下左右に広げ、端ぎりぎりのラベル切れを防ぐ（単位: pt）。"""
+    m = SVG_VIEWBOX_RE.search(svg)
+    if not m:
+        return svg
+    x, y, w, h = (float(v) for v in m.groups())
+    x, y, w, h = x - margin, y - margin, w + 2 * margin, h + 2 * margin
+    svg = svg[: m.start()] + f'viewBox="{x} {y} {w} {h}"' + svg[m.end() :]
+    svg = re.sub(r'width="[\d.]+pt"', f'width="{w}pt"', svg, count=1)
+    svg = re.sub(r'height="[\d.]+pt"', f'height="{h}pt"', svg, count=1)
+    return svg
+
+
 def load_schemdraw() -> dict:
     """schemdrawを遅延importしてexec用の基本namespaceを返す。"""
     try:
@@ -262,6 +307,7 @@ def load_schemdraw() -> dict:
         )
     schemdraw.use("svg")  # matplotlib不要のSVGバックエンド
     schemdraw.config(bgcolor="white")  # ダークテーマのプレビューでも見えるように白背景
+    patch_cjk_width()
     from schemdraw import dsp, elements as elm, flow, logic
 
     return {
@@ -316,7 +362,8 @@ def render_block(
     if not getattr(d, "elements", None):
         return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）"
     out_dir.mkdir(exist_ok=True)
-    d.save(str(out_dir / fname))
+    svg = d.get_imagedata("svg").decode("utf-8")
+    (out_dir / fname).write_text(add_svg_margin(svg), encoding="utf-8")
     return fname, title, None
 
 
@@ -436,7 +483,7 @@ def cmd_svg() -> None:
     d = ns["d"]
     if not getattr(d, "elements", None):
         sys.exit("要素が0個です")
-    sys.stdout.write(d.get_imagedata("svg").decode("utf-8"))
+    sys.stdout.write(add_svg_margin(d.get_imagedata("svg").decode("utf-8")))
 
 
 def iter_md_files(root: Path):
