@@ -306,7 +306,8 @@ def load_schemdraw() -> dict:
             "  pip3 install --break-system-packages schemdraw"
         )
     schemdraw.use("svg")  # matplotlib不要のSVGバックエンド
-    schemdraw.config(bgcolor="white")  # ダークテーマのプレビューでも見えるように白背景
+    # 白背景: ダークテーマのプレビュー対応 / lblofst: ラベルと線のクリアランス確保（既定0.1は近すぎる）
+    schemdraw.config(bgcolor="white", lblofst=0.25)
     patch_cjk_width()
     from schemdraw import dsp, elements as elm, flow, logic
 

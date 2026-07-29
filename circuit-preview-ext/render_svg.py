@@ -180,7 +180,8 @@ def main():
     except ImportError:
         sys.exit("schemdraw が見つかりません: pip3 install --break-system-packages schemdraw")
     schemdraw.use("svg")
-    schemdraw.config(bgcolor="white")
+    # 白背景: ダークテーマのプレビュー対応 / lblofst: ラベルと線のクリアランス確保（既定0.1は近すぎる）
+    schemdraw.config(bgcolor="white", lblofst=0.25)
     patch_cjk_width()
     from schemdraw import dsp, elements as elm, flow, logic
 
