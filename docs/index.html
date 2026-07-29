@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>circuitmd Playground — テキストで回路図</title>
+<style>
+  :root {
+    --bg: #1e222a; --panel: #262b35; --border: #3a4150;
+    --text: #e6e9ef; --sub: #9aa3b2; --accent: #4da3ff; --err: #ff7b72; --warn: #e3b341;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "Helvetica Neue", "Hiragino Sans", Meiryo, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  header a { color: var(--sub); font-size: 12px; text-decoration: none; }
+  header a:hover { color: var(--accent); }
+  .spacer { flex: 1; }
+  select, button {
+    background: #313847; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #editor {
+    width: 42%; min-width: 280px; resize: none; border: none; outline: none;
+    background: var(--bg); color: var(--text); padding: 14px 16px;
+    font: 13px/1.7 "SF Mono", Menlo, Consolas, monospace; border-right: 1px solid var(--border);
+    white-space: pre; tab-size: 4;
+  }
+  #preview { flex: 1; overflow: auto; background: #fff; display: flex;
+             align-items: flex-start; justify-content: center; padding: 24px; }
+  #preview svg { max-width: 100%; height: auto; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; background: rgba(30,34,42,.92);
+    font-size: 14px; color: var(--sub); text-align: center; padding: 20px;
+  }
+  #overlay .bar { width: 260px; height: 6px; background: #313847; border-radius: 3px; overflow: hidden; }
+  #overlay .bar i { display: block; height: 100%; width: 30%; background: var(--accent);
+                    border-radius: 3px; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% {margin-left:-30%} 100% {margin-left:100%} }
+  .preview-wrap { position: relative; flex: 1; display: flex; min-width: 0; }
+  footer { padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--border);
+           font: 12px/1.6 "SF Mono", Menlo, monospace; min-height: 30px; max-height: 110px; overflow: auto; }
+  footer .ok { color: var(--sub); }
+  footer .err { color: var(--err); white-space: pre-wrap; }
+  footer .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ circuitmd <span>Playground</span></h1>
+  <a href="https://github.com/Duino-nano/circuitmd" target="_blank" rel="noopener">GitHub ↗</a>
+  <div class="spacer"></div>
+  <select id="samples">
+    <option value="">サンプルを選択…</option>
+    <option value="led">LED駆動回路</option>
+    <option value="pullup">GPIOプルアップ</option>
+    <option value="motor">NPNモータ駆動</option>
+    <option value="multivib">非安定マルチバイブレーター</option>
+  </select>
+  <button id="btn-share" disabled>共有リンク</button>
+  <button id="btn-svg" disabled>SVG保存</button>
+  <button id="btn-png" disabled>PNG保存</button>
+</header>
+<main>
+  <textarea id="editor" spellcheck="false" placeholder="ここに回路を書く（1行=1部品）"></textarea>
+  <div class="preview-wrap">
+    <div id="preview"></div>
+    <div id="overlay">
+      <div class="bar"><i></i></div>
+      <div id="loadmsg">描画エンジンを準備しています…<br>
+        <small>初回のみ約10MBをダウンロードします（2回目以降はキャッシュで高速）</small></div>
+    </div>
+  </div>
+</main>
+<footer><span class="ok" id="status">起動中…</span></footer>
+
+<script>
+const SAMPLES = {
+led: `title: LED駆動回路
+電源 3.3V ↑
+抵抗 330Ω →
+LED LED1 ↓ loc=下
+線 ←
+GND`,
+pullup: `title: GPIOプルアップ回路
+VDD 3.3V
+抵抗 10kΩ ↓
+点
+分岐
+線 GPIO4 → loc=右
+合流
+スイッチ SW1 ↓ loc=下
+GND`,
+motor: `title: NPNモータ駆動回路
+NPN Q1 loc=右
+抵抗 1kΩ ← @Q1.base
+線 GPIO ← len=0.5 loc=左
+GND @Q1.emitter
+モータ M ↑ @Q1.collector
+VDD 5V @M.end
+点 @M.start
+点 @M.end
+線 → @M.start len=1.5
+ダイオード:FW 1N4001 ↑ loc=下
+線 ← @FW.end len=1.5`,
+multivib: `title: 非安定マルチバイブレーター（LED交互点滅）
+d.config(unit=2)
+q1 = d.add(elm.BjtNpn(circle=True).reverse().anchor('base').at((0, 0)).label('Q1', loc='left'))
+q2 = d.add(elm.BjtNpn(circle=True).anchor('base').at((7, 0)).label('Q2', loc='right'))
+GND @q1.emitter
+GND @q2.emitter
+線 ↑ @q1.collector len=1
+点:c1tap
+線 ↑ @q2.collector len=1
+点:c2tap
+抵抗 R1 470Ω ↑ @c1tap.center
+LED LED1 ↑
+抵抗 R4 470Ω ↑ @c2tap.center loc=下
+LED LED2 ↑ loc=下
+線 @LED1.end tox=@LED2.end
+点 @(3.5,LED1.end.y)
+VDD 5V @(3.5,LED1.end.y)
+jy = c1tap.center.y
+点:b1 @(2,jy)
+点:b2 @(5,jy)
+点 @(2,LED1.end.y)
+点 @(5,LED1.end.y)
+抵抗 R2 10kΩ ↑ @b1.center toy=@LED1.end
+抵抗 R3 10kΩ ↑ @b2.center toy=@LED1.end loc=下
+コンデンサ C1 47µF ← @b1.center tox=@c1tap.center
+コンデンサ C2 47µF → @b2.center tox=@c2tap.center
+線 ↓ @b1.center toy=@q2.base
+線 → tox=@q2.base
+線 ↓ @b2.center len=0.8
+線 ← tox=@q1.base
+線 ↓ toy=@q1.base`,
+};
+
+const CIRCUITMD_URL = "https://raw.githubusercontent.com/Duino-nano/circuitmd/main/circuitmd.py";
+const $ = (id) => document.getElementById(id);
+const editor = $("editor"), preview = $("preview"), statusEl = $("status");
+let pyodide = null, lastSvg = "", lastHash = "", timer = null;
+
+function setStatus(html, cls = "ok") { statusEl.className = cls; statusEl.innerHTML = html; }
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+// ---- URLハッシュでの共有（UTF-8対応base64） ----
+function encodeCode(s) { return btoa(String.fromCharCode(...new TextEncoder().encode(s))); }
+function decodeCode(b) { return new TextDecoder().decode(Uint8Array.from(atob(b), c => c.charCodeAt(0))); }
+
+// ---- エンジン初期化 ----
+async function boot() {
+  try {
+    $("loadmsg").innerHTML = "Python(WASM)エンジンを取得中…<br><small>初回のみ約10MB（以降はキャッシュ）</small>";
+    const mod = await import("https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.mjs");
+    pyodide = await mod.loadPyodide();
+    $("loadmsg").textContent = "回路図ライブラリ(schemdraw)を導入中…";
+    await pyodide.loadPackage("micropip");
+    const micropip = pyodide.pyimport("micropip");
+    await micropip.install("schemdraw");
+    $("loadmsg").textContent = "circuitmd を読み込み中…";
+    const src = await (await fetch(CIRCUITMD_URL, { cache: "no-cache" })).text();
+    pyodide.FS.writeFile("/home/pyodide/circuitmd.py", src);
+    pyodide.runPython(`
+import json, circuitmd
+def _render(text):
+    try:
+        svg, warns = circuitmd.render_source(text)
+        return json.dumps({"svg": svg, "warnings": list(warns)})
+    except circuitmd.CircuitError as e:
+        return json.dumps({"error": str(e)})
+`);
+    $("overlay").style.display = "none";
+    ["btn-share", "btn-svg", "btn-png"].forEach(id => $(id).disabled = false);
+    setStatus("準備完了 — 左のエディタに回路を書くと即プレビューされます");
+    render();
+  } catch (e) {
+    $("overlay").querySelector(".bar").style.display = "none";
+    $("loadmsg").innerHTML = "エンジンの読み込みに失敗しました。<br><small>" + esc(String(e)) + "</small>";
+  }
+}
+
+// ---- 描画 ----
+function render() {
+  if (!pyodide) return;
+  const text = editor.value;
+  if (!text.trim()) { preview.innerHTML = ""; setStatus("回路を入力してください"); return; }
+  const hash = text.length + ":" + text;
+  if (hash === lastHash) return;
+  lastHash = hash;
+  const t0 = performance.now();
+  pyodide.globals.set("_SRC", text);
+  const res = JSON.parse(pyodide.runPython("_render(_SRC)"));
+  if (res.error) {
+    setStatus(esc(res.error), "err");
+    return; // 直前の正常な図を残す（タイプ中のエラーで消さない）
+  }
+  lastSvg = res.svg;
+  preview.innerHTML = res.svg;
+  const ms = (performance.now() - t0).toFixed(0);
+  let msg = `描画 ${ms}ms`;
+  if (res.warnings.length) {
+    setStatus(`${msg} ／ <span class="warn">[警告] ラベル重なり未解消: ${esc(res.warnings.join(", "))}</span>`);
+  } else {
+    setStatus(msg);
+  }
+}
+
+editor.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(render, 300); });
+
+// ---- ツールバー ----
+$("samples").addEventListener("change", (e) => {
+  if (!e.target.value) return;
+  editor.value = SAMPLES[e.target.value];
+  lastHash = ""; render();
+});
+$("btn-svg").addEventListener("click", () => {
+  if (!lastSvg) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lastSvg], { type: "image/svg+xml" }));
+  a.download = "circuit.svg"; a.click(); URL.revokeObjectURL(a.href);
+});
+$("btn-png").addEventListener("click", () => {
+  if (!lastSvg) return;
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2, c = document.createElement("canvas");
+    c.width = img.width * scale; c.height = img.height * scale;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.scale(scale, scale); ctx.drawImage(img, 0, 0);
+    c.toBlob((b) => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(b); a.download = "circuit.png"; a.click();
+      URL.revokeObjectURL(a.href);
+    }, "image/png");
+  };
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(lastSvg);
+});
+$("btn-share").addEventListener("click", async () => {
+  location.hash = "code=" + encodeCode(editor.value);
+  try { await navigator.clipboard.writeText(location.href); setStatus("共有リンクをコピーしました"); }
+  catch { setStatus("URLを共有リンクとして使えます（アドレスバーからコピー）"); }
+});
+
+// ---- 初期コード（#code= があれば復元、なければLEDサンプル） ----
+const m = location.hash.match(/code=([^&]+)/);
+try { editor.value = m ? decodeCode(m[1]) : SAMPLES.led; }
+catch { editor.value = SAMPLES.led; }
+
+boot();
+</script>
+</body>
+</html>

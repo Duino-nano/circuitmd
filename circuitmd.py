@@ -701,9 +701,16 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
     return errors
 
 
-def cmd_svg() -> None:
-    """標準入力の回路コードをSVGにして標準出力へ。VSCodeプレビュー拡張用。"""
-    code_lines = sys.stdin.read().splitlines()
+class CircuitError(Exception):
+    """回路コードの構文・実行エラー（行番号付きメッセージ）。"""
+
+
+def render_source(code_text: str) -> tuple[str, list[str]]:
+    """フェンス内容テキスト → (後処理済みSVG, 重なり警告一覧)。
+
+    CLI(svg)・VSCode拡張・Web Playground 共通の入口。エラーは CircuitError。
+    """
+    code_lines = code_text.splitlines()
     base_ns = load_schemdraw()
     src, _title = transform(code_lines)
     ns = dict(base_ns)
@@ -724,11 +731,19 @@ def cmd_svg() -> None:
             msg = f"{lineno}行目: {msg}"
             if 1 <= lineno <= len(code_lines):
                 msg += f"\n> {code_lines[lineno - 1]}"
-        sys.exit(msg)
+        raise CircuitError(msg) from exc
     d = ns["d"]
     if not getattr(d, "elements", None):
-        sys.exit("要素が0個です")
-    svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+        raise CircuitError("要素が0個です")
+    return postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+
+
+def cmd_svg() -> None:
+    """標準入力の回路コードをSVGにして標準出力へ。VSCodeプレビュー拡張用。"""
+    try:
+        svg, warns = render_source(sys.stdin.read())
+    except CircuitError as exc:
+        sys.exit(str(exc))
     for w in warns:
         print(f"[警告] ラベル「{w}」の重なりを自動解消できませんでした", file=sys.stderr)
     sys.stdout.write(svg)
