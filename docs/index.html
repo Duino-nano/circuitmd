@@ -181,9 +181,11 @@ def _render(text):
     ["btn-share", "btn-svg", "btn-png"].forEach(id => $(id).disabled = false);
     setStatus("準備完了 — 左のエディタに回路を書くと即プレビューされます");
     render();
+    window.__circuitmdReady = true;  // 自動テスト用フラグ
   } catch (e) {
     $("overlay").querySelector(".bar").style.display = "none";
     $("loadmsg").innerHTML = "エンジンの読み込みに失敗しました。<br><small>" + esc(String(e)) + "</small>";
+    window.__circuitmdError = String(e);  // 自動テスト用フラグ
   }
 }
 

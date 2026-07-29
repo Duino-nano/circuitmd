@@ -5,7 +5,9 @@
 .md内の ```` ```circuit ```` フェンスに回路をテキストで書くと、
 [schemdraw](https://schemdraw.readthedocs.io/) ベースの教科書品質な回路図としてレンダリングされます。
 
-- **VSCode拡張** … Markdownプレビューでフェンスをリアルタイム描画（1ブロック約50ms）
+- **▶ [Web Playground](https://duino-nano.github.io/circuitmd/)** … インストール不要。ブラウザで書いて即プレビュー、SVG/PNGダウンロード
+- **VSCode拡張** … Markdownプレビューでフェンスをリアルタイム描画（1ブロック約50ms）。
+  **Pythonのインストール不要**（WASMエンジン同梱。ローカルにPythonがあれば自動でそちらを優先）
 - **CLI** … SVGファイル生成＋画像リンク自動挿入。GitHub上でもそのまま回路図が表示される
 
 ```
@@ -34,26 +36,30 @@ GND
 
 ## インストール
 
-前提: Python 3.10+ / macOS または Linux（VSCode拡張はmacOSで動作確認）
+### お試しだけなら → [Web Playground](https://duino-nano.github.io/circuitmd/)
+
+インストール不要。ブラウザ内でPython(WASM)＋schemdrawが動くため、描画結果はローカル版と
+完全に同一です。SVG/PNGのダウンロードもここでできます。
+
+### VSCode拡張（リアルタイムプレビュー・Python不要）
 
 ```bash
-pip install schemdraw          # 描画エンジン（matplotlib不要のSVGバックエンドを使用）
 git clone https://github.com/Duino-nano/circuitmd.git
-```
-
-### VSCode拡張（リアルタイムプレビュー）
-
-```bash
 cd circuitmd/circuit-preview-ext
-./build_vsix.sh                # vsix作成 + インストールまで実行
+./build_vsix.sh                # vsix作成 + インストールまで実行（ビルドにはcurl/python3を使用）
 ```
+
+拡張にはWASMエンジン（Pyodide＋schemdraw）が同梱されており、**利用側の環境にPythonが
+なくても動きます**。ローカルにpython3があれば自動でそちらを優先（起動が速い）。
+検証用に環境変数 `CIRCUITMD_FORCE_WASM=1` でWASM経路を強制できます。
 
 実行後、VSCodeのウィンドウを再読み込み（⌘⇧P →「開発者: ウィンドウの再読み込み」）すると、
 Markdownプレビュー（⇧⌘V）で ```circuit フェンスが回路図として表示されます。編集は即反映されます。
 
-### CLI（SVGファイル化・GitHub公開用）
+### CLI（SVGファイル化・GitHub公開用。こちらはPython 3.10+が必要）
 
 ```bash
+pip install schemdraw               # 描画エンジン（matplotlib不要のSVGバックエンドを使用）
 ./circuitmd.py render <file.md>     # mdと同階層の circuits/ にSVG生成＋画像リンク自動挿入
 ./circuitmd.py render --dir <dir>   # ディレクトリ以下を再帰処理
 ./circuitmd.py check <file.md>      # 構文チェックのみ

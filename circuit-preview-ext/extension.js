@@ -1,8 +1,13 @@
 // Circuit Preview — Markdownプレビューで ```circuit フェンスを回路図としてレンダリングする拡張。
-// 描画は circuitmd.py の svg サブコマンド（schemdraw）に委譲し、返ってきたSVGを
-// プレビューHTMLに直接インライン埋め込みする。画像ファイルを経由しないので
-// プレビューのローカルリソース制限の影響を受けず、編集がリアルタイムに反映される。
-// 内容ハッシュでキャッシュするため、変更のないブロックの再描画は瞬時。
+// 描画は同梱の circuitmd.py（schemdraw）に委譲し、返ってきたSVGをプレビューHTMLに
+// 直接インライン埋め込みする。内容ハッシュでキャッシュするため再描画は瞬時。
+//
+// レンダラは2系統:
+//   1. ローカルPython（あれば優先。高速・省メモリ）
+//   2. 同梱Pyodide（WASM）。Pythonが無い環境でも拡張だけで動く。
+//      初回はエンジン起動に数秒かかるため、プレースホルダを返してロード完了後に
+//      プレビューを自動リフレッシュする。
+// 環境変数 CIRCUITMD_FORCE_WASM=1 でWASM経路を強制できる（検証用）。
 
 const { execFileSync } = require("child_process");
 const crypto = require("crypto");
@@ -13,44 +18,126 @@ const path = require("path");
 // Documents配下を直接参照するとmacOSのTCCでVSCodeの子プロセスから読めないことが
 // あるための同梱方式。svgサブコマンドは標準入力→標準出力で完結し、ファイル不要。
 const SCRIPT = path.join(__dirname, "circuitmd.py");
+const PYODIDE_DIR = path.join(__dirname, "pyodide");
 const PYTHON_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"];
+const FORCE_WASM = process.env.CIRCUITMD_FORCE_WASM === "1";
 
 const cache = new Map(); // 内容ハッシュ → 描画済みHTML
 
 function pythonPath() {
+  if (FORCE_WASM) return null;
   for (const p of PYTHON_CANDIDATES) {
     if (fs.existsSync(p)) return p;
   }
-  return "python3";
+  return null; // 見つからなければWASMへ
 }
 
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function svgHtml(svg) {
+  return (
+    '<div class="circuit-diagram" style="background:#fff;display:inline-block;' +
+    'padding:14px;border-radius:6px;max-width:100%;overflow-x:auto;margin:4px 0">' +
+    svg +
+    "</div>"
+  );
+}
+
+function errorHtml(msg) {
+  return (
+    '<pre style="border:1px solid #d66;border-radius:6px;padding:10px;' +
+    'color:#d66;white-space:pre-wrap">circuit描画エラー\n' +
+    escapeHtml(String(msg).trim()) +
+    "</pre>"
+  );
+}
+
+// ---- WASMエンジン（Pyodide） ----------------------------------------------
+let wasmEngine = null;        // 初期化完了後の pyodide インスタンス
+let wasmLoadPromise = null;   // ロード中のPromise（多重起動防止）
+let wasmLoadError = null;
+
+function startWasmEngine() {
+  if (wasmLoadPromise) return;
+  wasmLoadPromise = (async () => {
+    const { loadPyodide } = require(path.join(PYODIDE_DIR, "pyodide.js"));
+    const py = await loadPyodide({ indexURL: PYODIDE_DIR });
+    // schemdraw wheel（同梱）をsite-packagesへ展開
+    const wheelName = fs.readdirSync(__dirname).find((f) => f.endsWith(".whl"));
+    if (!wheelName) throw new Error("同梱のschemdraw wheelが見つかりません");
+    const buf = fs.readFileSync(path.join(__dirname, wheelName));
+    await py.unpackArchive(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), "wheel");
+    // 同梱circuitmd.pyを読み込み
+    py.FS.writeFile("/home/pyodide/circuitmd.py", fs.readFileSync(SCRIPT, "utf8"));
+    py.runPython(
+      "import json, circuitmd\n" +
+      "def _render(text):\n" +
+      "    try:\n" +
+      "        svg, warns = circuitmd.render_source(text)\n" +
+      "        return json.dumps({'svg': svg, 'warnings': list(warns)})\n" +
+      "    except circuitmd.CircuitError as e:\n" +
+      "        return json.dumps({'error': str(e)})\n"
+    );
+    wasmEngine = py;
+  })();
+  wasmLoadPromise
+    .catch((e) => {
+      wasmLoadError = e;
+    })
+    .finally(() => {
+      // エンジン準備完了（or失敗）後にプレビューを再描画してプレースホルダを差し替える
+      try {
+        require("vscode").commands.executeCommand("markdown.preview.refresh");
+      } catch (_) {
+        /* markdownプレビュー以外の文脈では無視 */
+      }
+    });
+}
+
+function renderWithWasm(code) {
+  wasmEngine.globals.set("_SRC", code);
+  const res = JSON.parse(wasmEngine.runPython("_render(_SRC)"));
+  if (res.error) return errorHtml(res.error);
+  return svgHtml(res.svg);
+}
+
+// ---- フェンス→HTML ---------------------------------------------------------
 function renderCircuit(code) {
   const key = crypto.createHash("sha1").update(code).digest("hex");
   if (cache.has(key)) return cache.get(key);
 
   let html;
-  try {
-    const svg = execFileSync(pythonPath(), [SCRIPT, "svg"], {
-      input: code,
-      timeout: 15000,
-      encoding: "utf8",
-    });
-    html =
-      '<div class="circuit-diagram" style="background:#fff;display:inline-block;' +
-      'padding:14px;border-radius:6px;max-width:100%;overflow-x:auto;margin:4px 0">' +
-      svg +
-      "</div>";
-  } catch (e) {
-    const msg = e.stderr ? e.stderr.toString() : e.message;
-    html =
-      '<pre style="border:1px solid #d66;border-radius:6px;padding:10px;' +
-      'color:#d66;white-space:pre-wrap">circuit描画エラー\n' +
-      escapeHtml(msg.trim()) +
-      "</pre>";
+  const py = pythonPath();
+  if (py) {
+    // ローカルPython経路（従来どおり）
+    try {
+      const svg = execFileSync(py, [SCRIPT, "svg"], {
+        input: code,
+        timeout: 15000,
+        encoding: "utf8",
+      });
+      html = svgHtml(svg);
+    } catch (e) {
+      html = errorHtml(e.stderr ? e.stderr.toString() : e.message);
+    }
+  } else if (wasmEngine) {
+    // WASM経路（ロード済み）
+    try {
+      html = renderWithWasm(code);
+    } catch (e) {
+      html = errorHtml(e.message || e);
+    }
+  } else if (wasmLoadError) {
+    html = errorHtml("WASMエンジンの起動に失敗しました: " + wasmLoadError.message);
+  } else {
+    // WASMエンジンを起動しつつプレースホルダを返す（キャッシュしない）
+    startWasmEngine();
+    return (
+      '<div style="border:1px dashed #888;border-radius:6px;padding:14px;color:#888">' +
+      "⏳ 回路図エンジン（WASM）を起動中… 数秒後に自動で表示されます</div>"
+    );
   }
 
   if (cache.size > 300) cache.clear(); // 雑でよい上限（1エントリ数KB）
