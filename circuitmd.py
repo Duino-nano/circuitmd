@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""Markdown内の ```circuit フェンスをSVG回路図に変換するツール。
+
+Mermaidのように「テキストで回路を書いて図でレンダリング」するための仕組み。
+.md内の ```circuit ブロックに schemdraw 記法で回路を書き、このツールを実行すると
+mdと同じディレクトリの circuits/ にSVGを生成し、フェンス直後に画像リンクを
+自動挿入する。VSCodeのMarkdownプレビューやGitHubでそのまま回路図が見える。
+
+依存: schemdraw（pip3 install --break-system-packages schemdraw）
+      check サブコマンドだけなら schemdraw 無しでも動く。
+
+使い方:
+    circuitmd.py render <file.md> [<file2.md> ...]   # 指定mdを変換
+    circuitmd.py render --dir <dir>                  # ディレクトリ以下の*.mdを再帰変換
+    circuitmd.py check <file.md ...>                 # 構文チェックのみ（SVG生成・md書換なし）
+    circuitmd.py check --dir <dir>
+    circuitmd.py svg                                 # 標準入力の回路コード→標準出力にSVG
+                                                     # （VSCodeプレビュー拡張 circuit-preview が使う）
+
+記法（フェンス内のルール）:
+    - 1行目に「title: 回路名」を書くと画像のalt文字列になる（省略可）
+    - 簡易DSL行（推奨）: 「部品[:変数名] ラベル 方向 [@接続先] [オプション]」
+        例: 抵抗 330Ω →  /  NPN Q1 loc=右  /  GND @Q1.emitter  /  分岐 ・ 合流
+        方向: → ← ↑ ↓（right等・右左上下も可） 接続: @Q1.base や @(2,1.5)
+        オプション: loc=下 len=1.5 tox=@X.end toy=@Y.end rev(左右反転) flip(上下反転)
+        先頭ラベル語が英数字名（Q1等）なら変数になり @Q1.base で参照できる
+    - elm. / logic. / flow. / dsp. で始まる行は自動で「d += 」が付く（1行=1要素）
+    - それ以外は素のPythonとして実行される。DSL行と自由に混在できる
+    - ラベルの単位はΩ・μなどUnicodeを直接書く（$...$ のLaTeX記法は使わない）
+
+記法リファレンスは README.md、実例集は circuit-sample.md を参照。
+
+再実行しても安全（冪等）:
+    - 生成した画像リンク行には <!-- circuit:auto --> マーカーが付き、再実行時は置換される
+    - SVGファイル名は内容のハッシュ入り。内容が変わらなければ再生成しない
+    - 内容変更で不要になった旧SVGは自動削除（自動生成の命名パターンに一致するものだけ）
+"""
+
+import argparse
+import hashlib
+import math
+import re
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+
+MARKER = "<!-- circuit:auto -->"
+FENCE_RE = re.compile(r"^(`{3,})(\S*)\s*$")
+AUTO_PREFIX_RE = re.compile(r"^(elm|logic|flow|dsp)\.|^\(")
+TITLE_RE = re.compile(r"^title:\s*(.*)$")
+
+# ---- 簡易DSL（人間が読み書きしやすい行形式。schemdraw記法と行単位で混在可） ----
+# 書式:  部品[:変数名] [ラベル語...] [方向] [@接続先] [オプション]
+# 例:    抵抗 330Ω →     /  NPN Q1 loc=右  /  GND @Q1.emitter  /  点:b1 @(2,1.5)
+DSL_COMPONENTS = {
+    "R": "Resistor()", "抵抗": "Resistor()",
+    "C": "Capacitor()", "コンデンサ": "Capacitor()",
+    "CP": "Capacitor(polar=True)", "電解コンデンサ": "Capacitor(polar=True)",
+    "L": "Inductor()", "コイル": "Inductor()",
+    "LED": "LED()",
+    "D": "Diode()", "ダイオード": "Diode()",
+    "ZD": "Zener()", "ツェナー": "Zener()",
+    "SW": "Switch()", "スイッチ": "Switch()",
+    "BTN": "Button()", "ボタン": "Button()",
+    "V": "SourceV()", "電源": "SourceV()",
+    "BAT": "Battery()", "電池": "Battery()",
+    "GND": "Ground()", "グランド": "Ground()",
+    "VDD": "Vdd()", "VCC": "Vdd()",
+    "DOT": "Dot()", "点": "Dot()",
+    "W": "Line()", "LINE": "Line()", "線": "Line()",
+    "NPN": "BjtNpn(circle=True)", "PNP": "BjtPnp(circle=True)",
+    "NMOS": "NFet()", "PMOS": "PFet()",
+    "OPAMP": "Opamp()", "オペアンプ": "Opamp()",
+    "MOTOR": "Motor()", "モータ": "Motor()", "モーター": "Motor()",
+    "SPK": "Speaker()", "スピーカ": "Speaker()",
+    "XTAL": "Crystal()", "水晶": "Crystal()",
+    "FUSE": "Fuse()", "ヒューズ": "Fuse()",
+    "POT": "Potentiometer()", "可変抵抗": "Potentiometer()",
+}
+DSL_DIRECTIONS = {
+    "→": "right", "->": "right", "右": "right", "right": "right",
+    "←": "left", "<-": "left", "左": "left", "left": "left",
+    "↑": "up", "上": "up", "up": "up",
+    "↓": "down", "下": "down", "down": "down",
+}
+DSL_LOC = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
+DSL_PUSH = {"分岐", "push"}
+DSL_POP = {"合流", "戻る", "pop"}
+DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy)=(.+)$")
+IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
+RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
+
+
+def _dsl_ref(val: str) -> str:
+    """@Q1.base → Q1.base、@(2,1.5) → (2,1.5)。@なしの数値はそのまま。"""
+    return val[1:] if val.startswith("@") else val
+
+
+def translate_dsl(line: str) -> str | None:
+    """DSL行を schemdraw のPython 1行に変換する。DSLでなければ None。"""
+    if line[:1] in (" ", "\t"):  # インデント行（forループ本体など）は対象外
+        return None
+    tokens = line.split()
+    if not tokens:
+        return None
+    if len(tokens) == 1 and tokens[0] in DSL_PUSH:
+        return "d.push()"
+    if len(tokens) == 1 and tokens[0] in DSL_POP:
+        return "d.pop()"
+
+    head, _, name = tokens[0].partition(":")
+    comp = DSL_COMPONENTS.get(head) or DSL_COMPONENTS.get(head.upper())
+    if comp is None:
+        return None
+
+    calls: list[str] = []
+    label_parts: list[str] = []
+    label_loc = None
+    for tok in tokens[1:]:
+        m = DSL_OPT_RE.match(tok)
+        if tok in DSL_DIRECTIONS:
+            calls.append(f".{DSL_DIRECTIONS[tok]}()")
+        elif tok.startswith("@"):
+            calls.append(f".at({_dsl_ref(tok)})")
+        elif tok in ("flip", "上下反転"):
+            calls.append(".flip()")
+        elif tok in ("rev", "reverse", "反転", "左右反転"):
+            calls.append(".reverse()")
+        elif m:
+            key, val = m.group(1), m.group(2)
+            if key == "len":
+                calls.append(f".length({val})")
+            elif key == "loc":
+                label_loc = DSL_LOC.get(val, val)
+            else:  # tox / toy
+                calls.append(f".{key}({_dsl_ref(val)})")
+        else:
+            label_parts.append(tok)
+
+    if label_parts:
+        text = " ".join(label_parts).replace("'", "\\'")
+        loc_arg = f", loc='{label_loc}'" if label_loc else ""
+        calls.append(f".label('{text}'{loc_arg})")
+        # 先頭ラベル語が識別子なら変数名を兼ねる（例: NPN Q1 → 変数Q1）
+        if not name and IDENT_RE.match(label_parts[0]) and label_parts[0] not in RESERVED_NAMES:
+            name = label_parts[0]
+
+    expr = "elm." + comp + "".join(calls)
+    if name and IDENT_RE.match(name) and name not in RESERVED_NAMES:
+        return f"{name} = d.add({expr})"
+    return f"d += {expr}"
+LINK_FNAME_RE = re.compile(r"\(circuits/([^)]+\.svg)\)")
+EXCLUDE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", ".next"}
+
+
+@dataclass
+class Block:
+    """mdファイル内の1つの ```circuit フェンスブロック。"""
+
+    index: int  # ファイル内で何番目のcircuitブロックか（1始まり）
+    fence_start: int  # 開始フェンスの行番号（0始まり）
+    fence_end: int  # 閉じフェンスの行番号
+    link_line: int | None  # 既存のマーカー付き画像リンク行（無ければNone）
+    code: list[str] = field(default_factory=list)  # フェンス内の生テキスト
+
+
+def parse_blocks(lines: list[str]) -> list[Block]:
+    """行スキャンで ```circuit ブロックを収集する。
+
+    正規表現一発ではなくステートマシンにするのは、````（4連フェンス）の中に
+    書かれた ```circuit の例示を誤検出しないため。閉じ判定は「開始と同数以上の
+    バッククォートのみの行」。
+    """
+    blocks = []
+    in_fence = False
+    fence_ticks = 0
+    is_circuit = False
+    start = 0
+    code: list[str] = []
+
+    for i, line in enumerate(lines):
+        if not in_fence:
+            m = FENCE_RE.match(line)
+            if m:
+                in_fence = True
+                fence_ticks = len(m.group(1))
+                is_circuit = m.group(2) == "circuit"
+                start = i
+                code = []
+        else:
+            m = FENCE_RE.match(line)
+            if m and m.group(2) == "" and len(m.group(1)) >= fence_ticks:
+                if is_circuit:
+                    blocks.append(
+                        Block(
+                            index=len(blocks) + 1,
+                            fence_start=start,
+                            fence_end=i,
+                            link_line=find_link_line(lines, i),
+                            code=code,
+                        )
+                    )
+                in_fence = False
+            elif is_circuit:
+                code.append(line)
+    return blocks
+
+
+def find_link_line(lines: list[str], fence_end: int) -> int | None:
+    """閉じフェンス直後（空行を挟んで3行以内）の既存マーカー行を探す。"""
+    for i in range(fence_end + 1, min(fence_end + 4, len(lines))):
+        if MARKER in lines[i]:
+            return i
+        if lines[i].strip():  # マーカー以外の実体行が来たら打ち切り
+            break
+    return None
+
+
+def transform(code_lines: list[str]) -> tuple[str, str]:
+    """フェンス内テキストを実行用Pythonソースに変換する。(ソース, title) を返す。
+
+    行数は絶対に変えない（エラー時の行番号をmd上の行と対応させるため）。
+    """
+    title = ""
+    out = []
+    in_meta = True  # 先頭の連続するメタ行だけ認識する
+    for line in code_lines:
+        if in_meta:
+            m = TITLE_RE.match(line)
+            if m:
+                title = m.group(1).strip()
+                # 「title: x」はPythonのアノテーション構文として黙って通って
+                # しまうため、明示的にコメント化して無効にする
+                out.append("# meta: " + line)
+                continue
+            in_meta = False
+        dsl = translate_dsl(line)
+        if dsl is not None:
+            out.append(dsl)
+        elif line.startswith("+= "):  # schemdraw-markdown互換の省略記法
+            out.append("d " + line)
+        elif AUTO_PREFIX_RE.match(line):
+            out.append("d += " + line)
+        else:
+            out.append(line)
+    return "\n".join(out), title
+
+
+def hash8(src: str) -> str:
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:8]
+
+
+def load_schemdraw() -> dict:
+    """schemdrawを遅延importしてexec用の基本namespaceを返す。"""
+    try:
+        import schemdraw
+    except ImportError:
+        sys.exit(
+            "エラー: schemdraw が必要です。\n"
+            "  pip3 install --break-system-packages schemdraw"
+        )
+    schemdraw.use("svg")  # matplotlib不要のSVGバックエンド
+    schemdraw.config(bgcolor="white")  # ダークテーマのプレビューでも見えるように白背景
+    from schemdraw import dsp, elements as elm, flow, logic
+
+    return {
+        "schemdraw": schemdraw,
+        "elm": elm,
+        "logic": logic,
+        "flow": flow,
+        "dsp": dsp,
+        "math": math,
+    }
+
+
+def block_error_report(md_path: Path, block: Block, exc: Exception, compile_name: str) -> str:
+    """例外からブロック内の行番号を特定して報告文字列を作る。"""
+    lineno = None
+    if isinstance(exc, SyntaxError) and exc.filename == compile_name:
+        lineno = exc.lineno
+    else:
+        for frame in traceback.extract_tb(exc.__traceback__):
+            if frame.filename == compile_name:
+                lineno = frame.lineno  # 最後に一致したフレーム＝ブロック内の行
+    msg = f"{type(exc).__name__}: {exc}"
+    head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜)"
+    if lineno is not None:
+        report = f"{head} 内 {lineno}行目: {msg}"
+        if 1 <= lineno <= len(block.code):
+            report += f"\n     > {block.code[lineno - 1]}"
+        return report
+    return f"{head}: {msg}"
+
+
+def render_block(
+    block: Block, md_path: Path, out_dir: Path, base_ns: dict
+) -> tuple[str | None, str, str | None]:
+    """1ブロックをSVGにする。(SVGファイル名 or None, title, エラー文 or None) を返す。"""
+    src, title = transform(block.code)
+    title = title or f"circuit {block.index}"
+    fname = f"{md_path.stem}-{block.index}-{hash8(src)}.svg"
+    if (out_dir / fname).exists():
+        return fname, title, None  # 内容不変なら再生成しない
+
+    compile_name = f"<{md_path.name}#block{block.index}>"
+    ns = dict(base_ns)
+    ns["d"] = ns["schemdraw"].Drawing()
+    try:
+        code = compile(src, compile_name, "exec")
+        exec(code, ns)  # 自分のドキュメント内の回路記述を実行するだけなので許容
+    except Exception as exc:
+        return None, title, block_error_report(md_path, block, exc, compile_name)
+
+    d = ns["d"]
+    if not getattr(d, "elements", None):
+        return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）"
+    out_dir.mkdir(exist_ok=True)
+    d.save(str(out_dir / fname))
+    return fname, title, None
+
+
+def apply_links(lines: list[str], results: list[tuple[Block, str | None, str]]) -> list[str]:
+    """画像リンクを挿入/置換する。行番号がずれないよう末尾のブロックから処理する。"""
+    lines = list(lines)
+    for block, fname, title in reversed(results):
+        if fname is None:
+            continue  # エラーブロックは既存リンクをそのまま残す
+        safe_title = title.replace("[", "").replace("]", "")
+        link = f"![{safe_title}](circuits/{fname}){MARKER}"
+        if block.link_line is not None:
+            lines[block.link_line] = link
+        else:
+            insertion = ["", link]
+            nxt = block.fence_end + 1
+            if nxt < len(lines) and lines[nxt].strip():
+                insertion.append("")  # 直後に本文が続くなら段落を分ける
+            lines[block.fence_end + 1 : block.fence_end + 1] = insertion
+    return lines
+
+
+def existing_svg_name(lines: list[str], block: Block) -> str | None:
+    """既存リンク行から現在参照中のSVGファイル名を取り出す。"""
+    if block.link_line is None:
+        return None
+    m = LINK_FNAME_RE.search(lines[block.link_line])
+    return m.group(1) if m else None
+
+
+def cleanup_svgs(out_dir: Path, stem: str, keep: set[str]) -> None:
+    """自動生成パターンに一致し、今回使われなかったSVGだけを削除する。"""
+    if not out_dir.is_dir():
+        return
+    pattern = re.compile(rf"^{re.escape(stem)}-\d+-[0-9a-f]{{8}}\.svg$")
+    for f in out_dir.iterdir():
+        if pattern.match(f.name) and f.name not in keep:
+            f.unlink()
+            print(f"  （旧SVGを削除: circuits/{f.name}）")
+
+
+def check_file(md_path: Path, blocks: list[Block]) -> int:
+    """構文チェックのみ。実行時エラー（NameError等）は検出できない。"""
+    errors = 0
+    for block in blocks:
+        src, _ = transform(block.code)
+        compile_name = f"<{md_path.name}#block{block.index}>"
+        try:
+            compile(src, compile_name, "exec")
+            print(f"[OK] {md_path} ブロック{block.index}")
+        except SyntaxError as exc:
+            errors += 1
+            print(block_error_report(md_path, block, exc, compile_name))
+    return errors
+
+
+def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
+    """1つのmdを処理してエラー数を返す。"""
+    text = md_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    blocks = parse_blocks(lines)
+    if not blocks:
+        return 0
+    if check_only:
+        return check_file(md_path, blocks)
+
+    errors = 0
+    keep: set[str] = set()
+    results = []
+    for block in blocks:
+        fname, title, err = render_block(block, md_path, md_path.parent / "circuits", base_ns)
+        if err:
+            errors += 1
+            print(err)
+            # エラー時は既存リンクが指すSVGを掃除対象から守る
+            old = existing_svg_name(lines, block)
+            if old:
+                keep.add(old)
+        else:
+            keep.add(fname)
+            print(f"[OK] {md_path} ブロック{block.index} → circuits/{fname}")
+        results.append((block, fname, title))
+
+    new_lines = apply_links(lines, results)
+    new_text = "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+    if new_text != text:
+        md_path.write_text(new_text, encoding="utf-8")
+        print(f"  （{md_path} に画像リンクを更新）")
+    cleanup_svgs(md_path.parent / "circuits", md_path.stem, keep)
+    return errors
+
+
+def cmd_svg() -> None:
+    """標準入力の回路コードをSVGにして標準出力へ。VSCodeプレビュー拡張用。"""
+    code_lines = sys.stdin.read().splitlines()
+    base_ns = load_schemdraw()
+    src, _title = transform(code_lines)
+    ns = dict(base_ns)
+    ns["d"] = ns["schemdraw"].Drawing()
+    compile_name = "<circuit>"
+    try:
+        exec(compile(src, compile_name, "exec"), ns)
+    except Exception as exc:
+        lineno = None
+        if isinstance(exc, SyntaxError) and exc.filename == compile_name:
+            lineno = exc.lineno
+        else:
+            for frame in traceback.extract_tb(exc.__traceback__):
+                if frame.filename == compile_name:
+                    lineno = frame.lineno
+        msg = f"{type(exc).__name__}: {exc}"
+        if lineno is not None:
+            msg = f"{lineno}行目: {msg}"
+            if 1 <= lineno <= len(code_lines):
+                msg += f"\n> {code_lines[lineno - 1]}"
+        sys.exit(msg)
+    d = ns["d"]
+    if not getattr(d, "elements", None):
+        sys.exit("要素が0個です")
+    sys.stdout.write(d.get_imagedata("svg").decode("utf-8"))
+
+
+def iter_md_files(root: Path):
+    for p in sorted(root.rglob("*.md")):
+        if not EXCLUDE_DIRS.intersection(p.parts):
+            yield p
+
+
+def collect_targets(args) -> list[Path]:
+    if args.dir:
+        return list(iter_md_files(Path(args.dir)))
+    if not args.files:
+        sys.exit("エラー: mdファイルか --dir を指定してください")
+    targets = []
+    for f in args.files:
+        p = Path(f)
+        if not p.is_file():
+            sys.exit(f"エラー: ファイルが見つかりません: {f}")
+        targets.append(p)
+    return targets
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Markdown内の```circuitフェンスをSVG回路図に変換")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in [
+        ("render", "SVGを生成してmdに画像リンクを挿入"),
+        ("check", "構文チェックのみ（SVG生成・md書換なし）"),
+    ]:
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("files", nargs="*", help="対象のmdファイル")
+        p.add_argument("--dir", help="ディレクトリ以下の*.mdを再帰処理")
+    sub.add_parser("svg", help="標準入力の回路コード→標準出力にSVG（プレビュー拡張用）")
+
+    args = parser.parse_args()
+    if args.command == "svg":
+        cmd_svg()
+        return
+    targets = collect_targets(args)
+    check_only = args.command == "check"
+    base_ns = None if check_only else load_schemdraw()
+
+    errors = sum(process_file(p, check_only, base_ns) for p in targets)
+    if errors:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
