@@ -9,9 +9,10 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-// レンダラは拡張内に同梱したものを使う。Documents配下のcircuitmd.pyを参照すると
-// macOSのTCC（フォルダアクセス制限）でVSCodeの子プロセスから読めないことがあるため。
-const SCRIPT = path.join(__dirname, "render_svg.py");
+// circuitmd.py 本体を拡張内に同梱して使う（ビルド時にコピーされる）。
+// Documents配下を直接参照するとmacOSのTCCでVSCodeの子プロセスから読めないことが
+// あるための同梱方式。svgサブコマンドは標準入力→標準出力で完結し、ファイル不要。
+const SCRIPT = path.join(__dirname, "circuitmd.py");
 const PYTHON_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"];
 
 const cache = new Map(); // 内容ハッシュ → 描画済みHTML
@@ -33,7 +34,7 @@ function renderCircuit(code) {
 
   let html;
   try {
-    const svg = execFileSync(pythonPath(), [SCRIPT], {
+    const svg = execFileSync(pythonPath(), [SCRIPT, "svg"], {
       input: code,
       timeout: 15000,
       encoding: "utf8",

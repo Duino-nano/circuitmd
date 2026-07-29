@@ -9,7 +9,9 @@ VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['versio
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/extension" dist
-cp package.json extension.js render_svg.py "$WORK/extension/"
+# circuitmd.py 本体を同梱（変換ロジックの単一ソース化。render_svg.pyは廃止済み）
+cp package.json extension.js "$WORK/extension/"
+cp ../circuitmd.py "$WORK/extension/"
 
 cat > "$WORK/[Content_Types].xml" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>

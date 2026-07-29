@@ -282,6 +282,248 @@ def patch_cjk_width() -> None:
 
 SVG_VIEWBOX_RE = re.compile(r'viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+)"')
 
+# ---- SVG後処理: ラベル重なりの自動回避 ----------------------------------
+# schemdrawはラベルの衝突回避をしないため、生成後のSVGを解析して
+# テキストと配線・他テキストの重なりを検出し、重なったラベルを最小移動量で
+# 空き位置へ退避する。動かしきれないものは警告として報告する。
+
+_FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _localname(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _path_segments(d: str) -> list[tuple[float, float, float, float]]:
+    """path のd属性を線分列に近似する（曲線は始点→終点の弦で代用）。"""
+    segs = []
+    cur = start = None
+    for m in re.finditer(r"([MLCQAZmlcqaz])([^MLCQAZmlcqaz]*)", d):
+        cmd, args = m.group(1).upper(), [float(v) for v in _FLOAT_RE.findall(m.group(2))]
+        if cmd == "M" and len(args) >= 2:
+            cur = start = (args[0], args[1])
+            for i in range(2, len(args) - 1, 2):  # 暗黙のL
+                nxt = (args[i], args[i + 1])
+                segs.append((*cur, *nxt))
+                cur = nxt
+        elif cmd == "L":
+            for i in range(0, len(args) - 1, 2):
+                nxt = (args[i], args[i + 1])
+                if cur:
+                    segs.append((*cur, *nxt))
+                cur = nxt
+        elif cmd == "C":
+            for i in range(0, len(args) - 5, 6):
+                nxt = (args[i + 4], args[i + 5])
+                if cur:
+                    segs.append((*cur, *nxt))
+                cur = nxt
+        elif cmd == "Q":
+            for i in range(0, len(args) - 3, 4):
+                nxt = (args[i + 2], args[i + 3])
+                if cur:
+                    segs.append((*cur, *nxt))
+                cur = nxt
+        elif cmd == "A":
+            for i in range(0, len(args) - 6, 7):
+                nxt = (args[i + 5], args[i + 6])
+                if cur:
+                    segs.append((*cur, *nxt))
+                cur = nxt
+        elif cmd == "Z" and cur and start:
+            segs.append((*cur, *start))
+            cur = start
+    return segs
+
+
+def _seg_hits_rect(x1, y1, x2, y2, r) -> bool:
+    rx0, ry0, rx1, ry1 = r
+    if max(x1, x2) < rx0 or min(x1, x2) > rx1 or max(y1, y2) < ry0 or min(y1, y2) > ry1:
+        return False
+    if rx0 <= x1 <= rx1 and ry0 <= y1 <= ry1:
+        return True
+    if rx0 <= x2 <= rx1 and ry0 <= y2 <= ry1:
+        return True
+
+    def ccw(ax, ay, bx, by, cx, cy):
+        return (by - ay) * (cx - ax) - (bx - ax) * (cy - ay)
+
+    for ex0, ey0, ex1, ey1 in (
+        (rx0, ry0, rx1, ry0), (rx1, ry0, rx1, ry1),
+        (rx0, ry1, rx1, ry1), (rx0, ry0, rx0, ry1),
+    ):
+        d1 = ccw(x1, y1, x2, y2, ex0, ey0)
+        d2 = ccw(x1, y1, x2, y2, ex1, ey1)
+        d3 = ccw(ex0, ey0, ex1, ey1, x1, y1)
+        d4 = ccw(ex0, ey0, ex1, ey1, x2, y2)
+        if d1 * d2 <= 0 and d3 * d4 <= 0:
+            return True
+    return False
+
+
+def _circle_hits_rect(cx, cy, cr, r) -> bool:
+    rx0, ry0, rx1, ry1 = r
+    nx = min(max(cx, rx0), rx1)
+    ny = min(max(cy, ry0), ry1)
+    return (cx - nx) ** 2 + (cy - ny) ** 2 <= cr * cr
+
+
+class _SvgText:
+    """SVG内の1ラベル（<text>と内部の<tspan>行）。"""
+
+    def __init__(self, el):
+        self.el = el
+        self.x = float(el.get("x", "0"))
+        self.y = float(el.get("y", "0"))
+        self.fs = float(el.get("font-size", "14"))
+        self.anchor = el.get("text-anchor", "start")
+        self.baseline = el.get("dominant-baseline", "")
+        self.lines = []  # (内容, yベースラインの相対位置)
+        cum = 0.0
+        tspans = [c for c in el if _localname(c.tag) == "tspan"]
+        if tspans:
+            for ts in tspans:
+                cum += float(ts.get("dy", "0"))
+                self.lines.append((ts.text or "", cum))
+        else:
+            self.lines.append((el.text or "", 0.0))
+        self.dx = 0.0
+        self.dy = 0.0
+
+    def _width(self, s: str) -> float:
+        from schemdraw.backends import svgtext
+
+        return svgtext.string_width(s, fontsize=self.fs, font="sans")
+
+    def bbox(self, dx=None, dy=None, pad=0.0):
+        dx = self.dx if dx is None else dx
+        dy = self.dy if dy is None else dy
+        w = max((self._width(s) for s, _ in self.lines), default=0.0)
+        if self.anchor == "middle":
+            x0 = self.x - w / 2
+        elif self.anchor == "end":
+            x0 = self.x - w
+        else:
+            x0 = self.x
+        ys = []
+        for _, base in self.lines:
+            b = self.y + base
+            if self.baseline == "central":
+                ys += [b - self.fs * 0.6, b + self.fs * 0.6]
+            else:  # ideographic等: ベースラインが行の下端付近
+                ys += [b - self.fs * 0.95, b + self.fs * 0.15]
+        return (x0 + dx - pad, min(ys) + dy - pad, x0 + w + dx + pad, max(ys) + dy + pad)
+
+    def apply(self):
+        if self.dx == 0 and self.dy == 0:
+            return
+        self.el.set("x", f"{self.x + self.dx}")
+        self.el.set("y", f"{self.y + self.dy}")
+        for c in self.el:
+            if _localname(c.tag) == "tspan" and c.get("x") is not None:
+                c.set("x", f"{float(c.get('x')) + self.dx}")
+
+
+def resolve_svg_overlaps(svg: str, margin: float = 10.0) -> tuple[str, list[str]]:
+    """ラベルの重なりを自動回避したSVGと、解消できなかった警告一覧を返す。"""
+    from xml.etree import ElementTree as ET
+
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+    root = ET.fromstring(svg)
+
+    segs: list[tuple[float, float, float, float]] = []
+    circles: list[tuple[float, float, float]] = []
+    texts: list[_SvgText] = []
+    for el in root.iter():
+        name = _localname(el.tag)
+        if name == "path" and el.get("d"):
+            segs.extend(_path_segments(el.get("d")))
+        elif name in ("polygon", "polyline") and el.get("points"):
+            pts = [float(v) for v in _FLOAT_RE.findall(el.get("points"))]
+            xy = list(zip(pts[0::2], pts[1::2]))
+            for a, b in zip(xy, xy[1:] + ([xy[0]] if name == "polygon" else [])):
+                segs.append((*a, *b))
+        elif name == "line":
+            segs.append(tuple(float(el.get(k, "0")) for k in ("x1", "y1", "x2", "y2")))
+        elif name == "rect":
+            x, y = float(el.get("x", "0")), float(el.get("y", "0"))
+            w, h = float(el.get("width", "0")), float(el.get("height", "0"))
+            segs += [(x, y, x + w, y), (x + w, y, x + w, y + h),
+                     (x + w, y + h, x, y + h), (x, y + h, x, y)]
+        elif name == "circle":
+            circles.append((float(el.get("cx", "0")), float(el.get("cy", "0")),
+                            float(el.get("r", "0"))))
+        elif name == "ellipse":
+            circles.append((float(el.get("cx", "0")), float(el.get("cy", "0")),
+                            max(float(el.get("rx", "0")), float(el.get("ry", "0")))))
+        elif name == "text":
+            texts.append(_SvgText(el))
+
+    def collides(t: _SvgText, dx, dy, pad) -> bool:
+        r = t.bbox(dx, dy, pad)
+        if any(_seg_hits_rect(*s, r) for s in segs):
+            return True
+        if any(_circle_hits_rect(*c, r) for c in circles):
+            return True
+        for o in texts:
+            if o is t:
+                continue
+            ob = o.bbox(pad=0.5)
+            if r[0] < ob[2] and r[2] > ob[0] and r[1] < ob[3] and r[3] > ob[1]:
+                return True
+        return False
+
+    warnings = []
+    # 大きく重なっているものから処理するため、まず衝突中のテキストを収集
+    for t in texts:
+        if not collides(t, t.dx, t.dy, pad=0.8):
+            continue
+        candidates = []
+        for d in (4, 7, 10, 14, 18):
+            candidates += [(0, -d), (0, d), (-d, 0), (d, 0),
+                           (-d, -d), (d, -d), (-d, d), (d, d)]
+        # 横スライドは同じ行に沿った移動で部品との対応が崩れにくいため、より遠くまで許す
+        for d in (24, 32, 40):
+            candidates += [(-d, 0), (d, 0), (0, -d)]
+        for dx, dy in candidates:
+            if not collides(t, dx, dy, pad=2.0):
+                t.dx, t.dy = dx, dy
+                break
+        else:
+            warnings.append(t.lines[0][0].strip() or "(無名ラベル)")
+    for t in texts:
+        t.apply()
+
+    # viewBoxを再計算（移動後のラベルも含めて余白を確保）
+    xs, ys = [], []
+    m = SVG_VIEWBOX_RE.search(svg)
+    if m:
+        vx, vy, vw, vh = (float(v) for v in m.groups())
+        xs += [vx, vx + vw]
+        ys += [vy, vy + vh]
+    for t in texts:
+        b = t.bbox()
+        xs += [b[0], b[2]]
+        ys += [b[1], b[3]]
+    if xs:
+        x0, y0 = min(xs) - margin, min(ys) - margin
+        w, h = max(xs) - min(xs) + 2 * margin, max(ys) - min(ys) + 2 * margin
+        root.set("viewBox", f"{x0} {y0} {w} {h}")
+        root.set("width", f"{w}pt")
+        root.set("height", f"{h}pt")
+
+    out = ET.tostring(root, encoding="unicode")
+    return out, warnings
+
+
+def postprocess_svg(svg: str) -> tuple[str, list[str]]:
+    """重なり自動回避＋余白確保。解析に失敗したら余白付与のみ行う。"""
+    try:
+        return resolve_svg_overlaps(svg)
+    except Exception:
+        return add_svg_margin(svg), []
+
 
 def add_svg_margin(svg: str, margin: float = 10.0) -> str:
     """SVGのviewBoxを上下左右に広げ、端ぎりぎりのラベル切れを防ぐ（単位: pt）。"""
@@ -342,13 +584,13 @@ def block_error_report(md_path: Path, block: Block, exc: Exception, compile_name
 
 def render_block(
     block: Block, md_path: Path, out_dir: Path, base_ns: dict
-) -> tuple[str | None, str, str | None]:
-    """1ブロックをSVGにする。(SVGファイル名 or None, title, エラー文 or None) を返す。"""
+) -> tuple[str | None, str, str | None, list[str]]:
+    """1ブロックをSVGにする。(SVGファイル名, title, エラー文, 重なり警告) を返す。"""
     src, title = transform(block.code)
     title = title or f"circuit {block.index}"
     fname = f"{md_path.stem}-{block.index}-{hash8(src)}.svg"
     if (out_dir / fname).exists():
-        return fname, title, None  # 内容不変なら再生成しない
+        return fname, title, None, []  # 内容不変なら再生成しない
 
     compile_name = f"<{md_path.name}#block{block.index}>"
     ns = dict(base_ns)
@@ -357,15 +599,15 @@ def render_block(
         code = compile(src, compile_name, "exec")
         exec(code, ns)  # 自分のドキュメント内の回路記述を実行するだけなので許容
     except Exception as exc:
-        return None, title, block_error_report(md_path, block, exc, compile_name)
+        return None, title, block_error_report(md_path, block, exc, compile_name), []
 
     d = ns["d"]
     if not getattr(d, "elements", None):
-        return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）"
+        return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）", []
     out_dir.mkdir(exist_ok=True)
-    svg = d.get_imagedata("svg").decode("utf-8")
-    (out_dir / fname).write_text(add_svg_margin(svg), encoding="utf-8")
-    return fname, title, None
+    svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+    (out_dir / fname).write_text(svg, encoding="utf-8")
+    return fname, title, None, warns
 
 
 def apply_links(lines: list[str], results: list[tuple[Block, str | None, str]]) -> list[str]:
@@ -435,7 +677,7 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
     keep: set[str] = set()
     results = []
     for block in blocks:
-        fname, title, err = render_block(block, md_path, md_path.parent / "circuits", base_ns)
+        fname, title, err, warns = render_block(block, md_path, md_path.parent / "circuits", base_ns)
         if err:
             errors += 1
             print(err)
@@ -446,6 +688,8 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
         else:
             keep.add(fname)
             print(f"[OK] {md_path} ブロック{block.index} → circuits/{fname}")
+            for w in warns:
+                print(f"  [警告] ブロック{block.index}: ラベル「{w}」の重なりを自動解消できませんでした（手動調整推奨）")
         results.append((block, fname, title))
 
     new_lines = apply_links(lines, results)
@@ -484,7 +728,10 @@ def cmd_svg() -> None:
     d = ns["d"]
     if not getattr(d, "elements", None):
         sys.exit("要素が0個です")
-    sys.stdout.write(add_svg_margin(d.get_imagedata("svg").decode("utf-8")))
+    svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+    for w in warns:
+        print(f"[警告] ラベル「{w}」の重なりを自動解消できませんでした", file=sys.stderr)
+    sys.stdout.write(svg)
 
 
 def iter_md_files(root: Path):
