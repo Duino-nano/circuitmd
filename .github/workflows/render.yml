@@ -1,0 +1,23 @@
+# mdをpushすると```circuitフェンスを自動レンダリングしてSVGをコミットするワークフロー。
+# GitHubのWebエディタで回路を編集→Commitするだけで、約30〜60秒後に図が更新される。
+# 他のリポジトリで使う場合は steps の `uses: ./` を `uses: Duino-nano/circuitmd@main` に変える。
+name: render circuits
+
+on:
+  push:
+    branches: [main]
+    paths: ["**.md"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: circuitmd-render
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./ # 他リポジトリでは Duino-nano/circuitmd@main

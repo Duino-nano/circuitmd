@@ -1,0 +1,47 @@
+name: circuitmd render
+description: >
+  Markdown内の ```circuit フェンス（schemdraw記法）をSVGにレンダリングし、
+  画像リンクを自動挿入してコミットする。GitHubのWebエディタで回路を編集するだけで
+  図が更新される。冪等（変更のあったブロックだけ再生成・旧SVGは自動削除）。
+branding:
+  icon: zap
+  color: green
+
+inputs:
+  dir:
+    description: 対象ディレクトリ（この下の*.mdを再帰処理）
+    required: false
+    default: "."
+  commit:
+    description: 変更を自動コミット・pushするか（true/false）
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: schemdrawを導入
+      shell: bash
+      run: pip install --quiet schemdraw==0.23
+
+    - name: 回路図をレンダリング
+      shell: bash
+      run: python3 "${{ github.action_path }}/circuitmd.py" render --dir "${{ inputs.dir }}"
+
+    - name: 変更を自動コミット
+      if: inputs.commit == 'true'
+      shell: bash
+      run: |
+        git config user.name "circuitmd-bot"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A
+        if git diff --cached --quiet; then
+          echo "回路図に変更なし（コミットをスキップ）"
+        else
+          git commit -m "circuitmd: 回路図SVGを自動更新"
+          git push
+        fi
