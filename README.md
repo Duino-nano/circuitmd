@@ -70,6 +70,46 @@ pip install schemdraw               # 描画エンジン（matplotlib不要のSV
 - 生成SVGをコミットすれば、GitHub上でも回路図が表示されます（プレビュー拡張はこの
   自動リンクを隠すので二重表示になりません）
 
+### GitHub Action（GitHub上の編集だけで図が更新される）
+
+このリポジトリはGitHub Actionとしても使えます。`.github/workflows/render.yml` を1つ置くだけ:
+
+```yaml
+name: render circuits
+on:
+  push:
+    branches: [main]
+    paths: ["**.md"]
+permissions:
+  contents: write
+concurrency:
+  group: circuitmd-render
+  cancel-in-progress: true
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Duino-nano/circuitmd@main
+```
+
+以後、**GitHubのWebエディタで ```circuit フェンスを編集してコミットするだけ**で、
+Actionがクラウドでレンダリングし、SVGと画像リンクを自動コミットします（約30〜60秒）。
+ローカル環境は一切不要です。入力: `dir`（対象ディレクトリ、既定 `.`）、`commit`（自動コミット、既定 `true`）。
+
+### AIスキル（Claude用）
+
+[`skills/circuitmd/`](skills/circuitmd/) に、AIがこの記法・レイアウト規範・検証手順を
+正しく扱うためのスキル定義を同梱しています。Claude Code なら:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -r skills/circuitmd ~/.claude/skills/   # またはリポジトリへのsymlink
+```
+
+以後「回路図を描いて」と頼むだけで、AIがこの記法で描き、レンダリング・目視検証・
+Playground共有リンク生成まで正しい手順で行います。
+
 ## 記法リファレンス
 
 ### 簡易DSL（基本）
