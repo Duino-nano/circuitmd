@@ -18,7 +18,7 @@ LED LED1 ↓ loc=下
 GND
 ```
 
-![LED駆動回路](circuits/circuit-sample-1-61fd7ded.svg)<!-- circuit:auto -->
+![LED駆動回路](circuits/circuit-sample-1-1e287e41.svg)<!-- circuit:auto -->
 
 ## 2. GPIOプルアップ＋タクトスイッチ
 
