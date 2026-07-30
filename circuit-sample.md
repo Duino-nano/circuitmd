@@ -12,7 +12,7 @@
 ```circuit
 title: LED駆動回路
 電源 3.3V ↑
-抵抗 220Ω →
+抵抗 330Ω →
 LED LED1 ↓ loc=下
 線 ←
 GND
