@@ -80,9 +80,10 @@ GND
 
 1. 回路をフェンスに書く（接続関係の一文をフェンス前のプレーンテキストにも添える）
 2. `circuitmd.py render <file.md>` を実行（SVG生成＋リンク自動挿入。冪等）
-   - CLI本体の場所が不明な場合: このスキルがsymlink導入なら
+   - CLI本体の場所: **このスキルフォルダ内に `circuitmd.py` が同梱されていればそれを使う**
+     （claude.aiアップロード用zip等）。symlink導入なら
      `"$(readlink -f ~/.claude/skills/circuitmd)/../../circuitmd.py"` がリポジトリ内の本体。
-     無ければ `git clone https://github.com/Duino-nano/circuitmd` して使う（要 `pip install schemdraw`）
+     いずれも無ければ `git clone https://github.com/Duino-nano/circuitmd`（要 `pip install schemdraw`）
 3. **PNG化して必ず目視検証してから納品する**（macOSの例。qlmanageは横長図を
    正方形クロップするので使わない）:
    ```bash
