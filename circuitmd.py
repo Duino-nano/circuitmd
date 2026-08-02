@@ -38,6 +38,7 @@ mdと同じディレクトリの circuits/ にSVGを生成し、フェンス直�
 """
 
 import argparse
+import difflib
 import hashlib
 import math
 import re
@@ -56,29 +57,56 @@ TITLE_RE = re.compile(r"^title:\s*(.*)$")
 # 書式:  部品[:変数名] [ラベル語...] [方向] [@接続先] [オプション]
 # 例:    抵抗 330Ω →     /  NPN Q1 loc=右  /  GND @Q1.emitter  /  点:b1 @(2,1.5)
 DSL_COMPONENTS = {
-    "R": "Resistor()", "抵抗": "Resistor()",
-    "C": "Capacitor()", "コンデンサ": "Capacitor()",
+    "R": "Resistor()", "抵抗": "Resistor()", "resistor": "Resistor()", "res": "Resistor()",
+    "C": "Capacitor()", "コンデンサ": "Capacitor()", "コンデンサー": "Capacitor()",
+    "capacitor": "Capacitor()", "cap": "Capacitor()",
     "CP": "Capacitor(polar=True)", "電解コンデンサ": "Capacitor(polar=True)",
-    "L": "Inductor()", "コイル": "Inductor()",
+    "polarcap": "Capacitor(polar=True)", "electrolytic": "Capacitor(polar=True)",
+    "L": "Inductor()", "コイル": "Inductor()", "inductor": "Inductor()", "coil": "Inductor()",
     "LED": "LED()",
-    "D": "Diode()", "ダイオード": "Diode()",
-    "ZD": "Zener()", "ツェナー": "Zener()",
-    "SW": "Switch()", "スイッチ": "Switch()",
-    "BTN": "Button()", "ボタン": "Button()",
-    "V": "SourceV()", "電源": "SourceV()",
-    "BAT": "Battery()", "電池": "Battery()",
-    "GND": "Ground()", "グランド": "Ground()",
-    "VDD": "Vdd()", "VCC": "Vdd()",
-    "DOT": "Dot()", "点": "Dot()",
-    "W": "Line()", "LINE": "Line()", "線": "Line()",
+    "D": "Diode()", "ダイオード": "Diode()", "diode": "Diode()",
+    "ZD": "Zener()", "ツェナー": "Zener()", "zener": "Zener()",
+    "SBD": "Schottky()", "ショットキー": "Schottky()", "schottky": "Schottky()",
+    "PD": "Photodiode()", "フォトダイオード": "Photodiode()", "photodiode": "Photodiode()",
+    "SW": "Switch()", "スイッチ": "Switch()", "switch": "Switch()",
+    "BTN": "Button()", "ボタン": "Button()", "button": "Button()",
+    "V": "SourceV()", "電源": "SourceV()", "source": "SourceV()", "vsource": "SourceV()",
+    "voltage": "SourceV()", "電圧源": "SourceV()",
+    "I": "SourceI()", "電流源": "SourceI()", "isource": "SourceI()",
+    "BAT": "Battery()", "電池": "Battery()", "battery": "Battery()",
+    "GND": "Ground()", "グランド": "Ground()", "ground": "Ground()", "gnd": "Ground()",
+    "VDD": "Vdd()", "VCC": "Vdd()", "vdd": "Vdd()", "vcc": "Vdd()",
+    "VSS": "Vss()", "vss": "Vss()",
+    "DOT": "Dot()", "点": "Dot()", "dot": "Dot()", "node": "Dot()", "接続点": "Dot()",
+    "W": "Line()", "LINE": "Line()", "線": "Line()", "line": "Line()", "wire": "Line()",
     "NPN": "BjtNpn(circle=True)", "PNP": "BjtPnp(circle=True)",
-    "NMOS": "NFet()", "PMOS": "PFet()",
-    "OPAMP": "Opamp()", "オペアンプ": "Opamp()",
-    "MOTOR": "Motor()", "モータ": "Motor()", "モーター": "Motor()",
-    "SPK": "Speaker()", "スピーカ": "Speaker()",
-    "XTAL": "Crystal()", "水晶": "Crystal()",
-    "FUSE": "Fuse()", "ヒューズ": "Fuse()",
+    "npn": "BjtNpn(circle=True)", "pnp": "BjtPnp(circle=True)",
+    "NMOS": "NFet()", "PMOS": "PFet()", "nmos": "NFet()", "pmos": "PFet()",
+    "NFET": "NFet()", "PFET": "PFet()", "nfet": "NFet()", "pfet": "PFet()",
+    "OPAMP": "Opamp()", "オペアンプ": "Opamp()", "opamp": "Opamp()",
+    "MOTOR": "Motor()", "モータ": "Motor()", "モーター": "Motor()", "motor": "Motor()",
+    "SPK": "Speaker()", "スピーカ": "Speaker()", "スピーカー": "Speaker()",
+    "speaker": "Speaker()",
+    "XTAL": "Crystal()", "水晶": "Crystal()", "crystal": "Crystal()",
+    "FUSE": "Fuse()", "ヒューズ": "Fuse()", "fuse": "Fuse()",
     "POT": "Potentiometer()", "可変抵抗": "Potentiometer()",
+    "potentiometer": "Potentiometer()",
+    "LAMP": "Lamp()", "ランプ": "Lamp()", "lamp": "Lamp()", "電球": "Lamp()",
+    "ANT": "Antenna()", "アンテナ": "Antenna()", "antenna": "Antenna()",
+}
+# 部品名が一意に決まらない語（例: 「トランジスタ」だけではNPN/PNPを選べない）。
+# 黙って推測せず、候補を示して書き手に選ばせる。
+DSL_AMBIGUOUS = {
+    "トランジスタ": ("NPN", "PNP", "NMOS", "PMOS"),
+    "transistor": ("NPN", "PNP", "NMOS", "PMOS"),
+    "tr": ("NPN", "PNP"),
+    "Q": ("NPN", "PNP", "NMOS", "PMOS"),
+    "FET": ("NMOS", "PMOS"),
+    "fet": ("NMOS", "PMOS"),
+    "MOSFET": ("NMOS", "PMOS"),
+    "mosfet": ("NMOS", "PMOS"),
+    "IC": ("elm.Ic(...)（素のschemdraw記法で書く）",),
+    "ic": ("elm.Ic(...)（素のschemdraw記法で書く）",),
 }
 DSL_DIRECTIONS = {
     "→": "right", "->": "right", "右": "right", "right": "right",
@@ -94,9 +122,52 @@ IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
 
 
+# 素のPython行として書かれたと判断する手がかり（この形ならPythonのエラーをそのまま出す）
+PY_LINE_RE = re.compile(
+    r"^\s*(?:elm|logic|flow|dsp|d)\b|[=(\[]|^\s*(?:for|if|while|import|from|def|print|return)\b"
+)
+
+
 def _dsl_ref(val: str) -> str:
     """@Q1.base → Q1.base、@(2,1.5) → (2,1.5)。@なしの数値はそのまま。"""
     return val[1:] if val.startswith("@") else val
+
+
+def diagnose_line(line: str) -> str | None:
+    """DSLのつもりで書かれて失敗した行に、原因の当たりを付けたメッセージを返す。
+
+    schemdrawに素通しすると「invalid character '→'」のような無関係なPythonエラーに
+    なり、書き手（特にAI）が自己修正できない。部品名の綴り違い・曖昧な指定を検出して
+    候補を提示する。判断できないときは None（Pythonのエラーをそのまま見せる）。
+    """
+    tokens = line.split()
+    if not tokens:
+        return None
+    head = tokens[0].partition(":")[0]
+
+    if head.startswith("graph") or "-->" in line or "---" in line:
+        return (
+            "Mermaid記法では回路図を書けません。circuitmdのDSL"
+            "（例: 抵抗 330Ω → ／ resistor 330Ω right）で書いてください"
+        )
+    if head in DSL_AMBIGUOUS:
+        return f"「{head}」だけでは部品を特定できません。候補: " + " / ".join(DSL_AMBIGUOUS[head])
+    if head in DSL_COMPONENTS or head.upper() in DSL_COMPONENTS or head.lower() in DSL_COMPONENTS:
+        return None  # 部品名は正しい。別の原因なのでPythonのエラーを見せる
+    if PY_LINE_RE.search(line):
+        return None  # 素のschemdraw/Python行として書かれている
+
+    lower_map = {}
+    for key in DSL_COMPONENTS:  # 小文字化キー → 表示用の元キー
+        lower_map.setdefault(key.lower(), key)
+    hits = difflib.get_close_matches(head.lower(), list(lower_map), n=3, cutoff=0.6)
+    if hits:
+        return f"未知の部品名「{head}」。もしかして: " + " / ".join(lower_map[h] for h in hits)
+    return (
+        f"未知の部品名「{head}」。主な部品: 抵抗/resistor コンデンサ/capacitor LED "
+        "ダイオード/diode スイッチ/switch 電源/source GND VDD NPN PNP NMOS PMOS "
+        "モータ/motor 線/line 点/dot（全一覧はREADMEの記法リファレンス）"
+    )
 
 
 def translate_dsl(line: str) -> str | None:
@@ -112,7 +183,11 @@ def translate_dsl(line: str) -> str | None:
         return "d.pop()"
 
     head, _, name = tokens[0].partition(":")
-    comp = DSL_COMPONENTS.get(head) or DSL_COMPONENTS.get(head.upper())
+    comp = (
+        DSL_COMPONENTS.get(head)
+        or DSL_COMPONENTS.get(head.upper())
+        or DSL_COMPONENTS.get(head.lower())
+    )
     if comp is None:
         return None
 
@@ -573,6 +648,8 @@ def block_error_report(md_path: Path, block: Block, exc: Exception, compile_name
             if frame.filename == compile_name:
                 lineno = frame.lineno  # 最後に一致したフレーム＝ブロック内の行
     msg = f"{type(exc).__name__}: {exc}"
+    if lineno is not None and 1 <= lineno <= len(block.code):
+        msg = diagnose_line(block.code[lineno - 1]) or msg
     head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜)"
     if lineno is not None:
         report = f"{head} 内 {lineno}行目: {msg}"
@@ -727,6 +804,8 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
                 if frame.filename == compile_name:
                     lineno = frame.lineno
         msg = f"{type(exc).__name__}: {exc}"
+        if lineno is not None and 1 <= lineno <= len(code_lines):
+            msg = diagnose_line(code_lines[lineno - 1]) or msg
         if lineno is not None:
             msg = f"{lineno}行目: {msg}"
             if 1 <= lineno <= len(code_lines):

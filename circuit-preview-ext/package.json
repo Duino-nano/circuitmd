@@ -2,7 +2,7 @@
   "name": "circuit-preview",
   "displayName": "Circuit Preview",
   "description": "Markdownプレビューで ```circuit フェンス（schemdraw記法）を回路図として直接レンダリングする（circuitmd.py 連携）",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "kyouhei",
   "engines": {
     "vscode": "^1.70.0"

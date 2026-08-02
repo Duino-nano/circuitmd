@@ -97,6 +97,46 @@ jobs:
 Actionがクラウドでレンダリングし、SVGと画像リンクを自動コミットします（約30〜60秒）。
 ローカル環境は一切不要です。入力: `dir`（対象ディレクトリ、既定 `.`）、`commit`（自動コミット、既定 `true`）。
 
+### 他のAI（ChatGPT / Gemini など）に書かせる
+
+記法を知らないAIは正しく書けません。下のプロンプトを貼ってから依頼してください
+（Playgroundの「AI用プロンプト」ボタンでもコピーできます）。
+
+```text
+あなたは回路図を「circuitmd記法」で書きます。出力は ```circuit フェンスのみ。
+
+【基本】1行=1部品。書式: 部品[:変数名] ラベル 方向 [@接続先] [オプション]
+【方向】→ ← ↑ ↓（right/left/up/down、右/左/上/下 も可）
+【部品】抵抗/resistor コンデンサ/capacitor 電解コンデンサ/polarcap コイル/inductor
+  LED ダイオード/diode ツェナー/zener ショットキー/schottky スイッチ/switch ボタン/button
+  電源/source 電池/battery GND/ground VDD/VCC 点/dot 線/line ヒューズ/fuse
+  NPN PNP NMOS PMOS オペアンプ/opamp モータ/motor スピーカ/speaker 水晶/crystal
+  可変抵抗/potentiometer ランプ/lamp
+  ※「トランジスタ」「FET」だけでは特定できない → NPN/PNP/NMOS/PMOS から選ぶ
+【接続】@Q1.base のようにアンカー参照（BJT: base/collector/emitter、
+  FET: gate/drain/source、2端子素子: start/end）。座標指定は @(2,1.5)（スペース禁止）
+【変数】先頭ラベルが英数字名なら変数になる（NPN Q1 → @Q1.base で参照）。
+  表示したくない名前は 点:b1 のように 部品:変数名 で付ける
+【分岐】分岐 … 合流 で枝を描く。分岐点には「点」を打つ
+【オプション】loc=下（ラベル位置） len=1.5（長さ） tox=@X.end toy=@Y.end
+  ofst=0.4（ラベルを線から離す） rev（左右反転） flip（上下反転）
+【禁止】Mermaid記法・LaTeX（$...$）。単位はΩやµをそのまま書く
+
+例:
+```circuit
+title: LED点灯回路
+電源 3.3V ↑
+抵抗 330Ω →
+LED LED1 ↓
+線 ←
+GND
+```
+```
+
+書かせた回路は https://duino-nano.github.io/circuitmd/ に貼れば図で確認できます。
+記法が違っていてもツールが「未知の部品名「transistor」。候補: NPN / PNP」のように
+指摘するので、そのメッセージをAIに返せば自己修正できます。
+
 ### AIスキル（Claude用）
 
 [`skills/circuitmd/`](skills/circuitmd/) に、AIがこの記法・レイアウト規範・検証手順を
@@ -170,6 +210,17 @@ schemdraw 自体はラベルの衝突回避をしませんが、circuitmd は**S
 - 長いラベルは `\n` で2行に割ると幅が半分になる
 - 日本語ラベルの文字幅・SVG余白はツール側で自動補正される（schemdraw素のままだと
   全角文字の幅が過小評価され、端のラベルが切れる）
+
+### 描画の落とし穴（素のschemdraw記法を混ぜるとき）
+
+図が「なぜか回転する・文字が二重になる・向きが逆」になったらこれを疑ってください。
+
+- **要素は直前の描画方向を継承して回転する**。直前が `線 ↓` の状態で `elm.NFet()` を置くと
+  FETが90度倒れる → `.right()` を明示してから `.reverse()` / `.anchor()` を付ける
+- **`elm.Label(label='X')` はテキストが二重描画される** → `elm.Label().at(...).label('X')` を使う
+- **`elm.Ic` の `IcPin(pos=)` は複数ピン構成だと効かないことがある** → IC名は独立した
+  `elm.Label()` で箱の脇に置く
+- **ツェナー/TVSを `↓` で描くとカソードがGND側**になる → `rev` でカソードを電源側に
 
 ## 仕組みと注意点
 

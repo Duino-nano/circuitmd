@@ -64,6 +64,7 @@
     <option value="motor">NPNモータ駆動</option>
     <option value="multivib">非安定マルチバイブレーター</option>
   </select>
+  <button id="btn-prompt" title="ChatGPTやGeminiに貼ると、この記法で回路図を書けるようになります">AI用プロンプト</button>
   <button id="btn-share" disabled>共有リンク</button>
   <button id="btn-svg" disabled>SVG保存</button>
   <button id="btn-png" disabled>PNG保存</button>
@@ -142,6 +143,38 @@ jy = c1tap.center.y
 線 ← tox=@q1.base
 線 ↓ toy=@q1.base`,
 };
+
+// 記法を知らないAI（ChatGPT/Gemini等）に貼るためのプロンプト
+const AI_PROMPT = `あなたは回路図を「circuitmd記法」で書きます。出力は \`\`\`circuit フェンスのみ。
+
+【基本】1行=1部品。書式: 部品[:変数名] ラベル 方向 [@接続先] [オプション]
+【方向】→ ← ↑ ↓（right/left/up/down、右/左/上/下 も可）
+【部品】抵抗/resistor コンデンサ/capacitor 電解コンデンサ/polarcap コイル/inductor
+  LED ダイオード/diode ツェナー/zener ショットキー/schottky スイッチ/switch ボタン/button
+  電源/source 電池/battery GND/ground VDD/VCC 点/dot 線/line ヒューズ/fuse
+  NPN PNP NMOS PMOS オペアンプ/opamp モータ/motor スピーカ/speaker 水晶/crystal
+  可変抵抗/potentiometer ランプ/lamp
+  ※「トランジスタ」「FET」だけでは特定できない → NPN/PNP/NMOS/PMOS から選ぶ
+【接続】@Q1.base のようにアンカー参照（BJT: base/collector/emitter、
+  FET: gate/drain/source、2端子素子: start/end）。座標指定は @(2,1.5)（スペース禁止）
+【変数】先頭ラベルが英数字名なら変数になる（NPN Q1 → @Q1.base で参照）。
+  表示したくない名前は 点:b1 のように 部品:変数名 で付ける
+【分岐】分岐 … 合流 で枝を描く。分岐点には「点」を打つ
+【オプション】loc=下（ラベル位置） len=1.5（長さ） tox=@X.end toy=@Y.end
+  ofst=0.4（ラベルを線から離す） rev（左右反転） flip（上下反転）
+【禁止】Mermaid記法・LaTeX（$...$）。単位はΩやµをそのまま書く
+
+例:
+\`\`\`circuit
+title: LED点灯回路
+電源 3.3V ↑
+抵抗 330Ω →
+LED LED1 ↓
+線 ←
+GND
+\`\`\`
+
+書いた回路は https://duino-nano.github.io/circuitmd/ に貼ると図を確認できます。`;
 
 const CIRCUITMD_URL = "https://raw.githubusercontent.com/Duino-nano/circuitmd/main/circuitmd.py";
 const $ = (id) => document.getElementById(id);
@@ -245,6 +278,16 @@ $("btn-png").addEventListener("click", () => {
     }, "image/png");
   };
   img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(lastSvg);
+});
+$("btn-prompt").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(AI_PROMPT);
+    setStatus("AI用プロンプトをコピーしました — ChatGPTやGeminiに貼ってから回路を依頼してください");
+  } catch {
+    // クリップボードが使えない環境ではエディタに出して手動コピーしてもらう
+    editor.value = AI_PROMPT;
+    setStatus("AI用プロンプトをエディタに表示しました（手動でコピーしてください）");
+  }
 });
 $("btn-share").addEventListener("click", async () => {
   location.hash = "code=" + encodeCode(editor.value);

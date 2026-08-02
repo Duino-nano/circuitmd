@@ -76,6 +76,20 @@ GND
 - 並列素子（還流ダイオード等）は `線 → len=1.5` で横にオフセットしてから描く
 - 日本語ラベルは英数字の約2倍幅。長い和文ラベルの隣に素子列を置かない（列間2〜2.5unit）
 
+## 描画の落とし穴（素のschemdraw記法を混ぜるとき）
+
+実際の設計書作成で踏んだもの。図が「なぜか回る・二重になる・向きが逆」になったら疑う。
+
+- **要素は直前の描画方向を継承して回転する**。直前が `線 ↓` の状態で `elm.NFet()` を置くと
+  FETが90度倒れる → **`.right()` を明示**してから `.reverse()` / `.anchor()` を付ける。
+  `elm.NFet()` は既定でゲートが**右**（左にしたいなら `.right().reverse()`）
+- **`elm.Label(label='X')` はテキストが二重描画される** → `elm.Label().at(...).label('X')` の
+  メソッド形式で書く
+- **`elm.Ic` の `IcPin(pos=)` は複数ピン構成だと効かないことがある** → IC名がピンのリード線と
+  重なるなら、独立した `elm.Label()` を箱の脇に置く
+- **ツェナー/TVSを `↓`（レール→GND）で描くとカソードがGND側**になる（保護素子として逆向き）
+  → `rev` を付けてカソードを電源側にする
+
 ## AIの作業手順（必ず守る）
 
 1. 回路をフェンスに書く（接続関係の一文をフェンス前のプレーンテキストにも添える）
@@ -85,9 +99,10 @@ GND
      `"$(readlink -f ~/.claude/skills/circuitmd)/../../circuitmd.py"` がリポジトリ内の本体。
      いずれも無ければ `git clone https://github.com/Duino-nano/circuitmd`（要 `pip install schemdraw`）
 3. **PNG化して必ず目視検証してから納品する**（macOSの例。qlmanageは横長図を
-   正方形クロップするので使わない）:
+   正方形クロップするので使わない）。**`timeout 60` を必ず前置する**——ヘッドレスChromeが
+   残留すると他のブラウザ自動操作を横取りして誤動作の原因になる:
    ```bash
-   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+   timeout 60 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
      --screenshot=/tmp/check.png --window-size=1400,900 "file://$PWD/circuits/xxx.svg"
    ```
 4. `[警告]` が出たラベルだけ上記の規範で調整して再render
