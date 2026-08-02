@@ -99,12 +99,14 @@ GND
      `"$(readlink -f ~/.claude/skills/circuitmd)/../../circuitmd.py"` がリポジトリ内の本体。
      いずれも無ければ `git clone https://github.com/Duino-nano/circuitmd`（要 `pip install schemdraw`）
 3. **PNG化して必ず目視検証してから納品する**（macOSの例。qlmanageは横長図を
-   正方形クロップするので使わない）。**`timeout 60` を必ず前置する**——ヘッドレスChromeが
-   残留すると他のブラウザ自動操作を横取りして誤動作の原因になる:
+   正方形クロップするので使わない）:
    ```bash
-   timeout 60 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu \
      --screenshot=/tmp/check.png --window-size=1400,900 "file://$PWD/circuits/xxx.svg"
+   pkill -f "Google Chrome.*--headless"   # 後始末（残留するとブラウザ自動操作を横取りする）
    ```
+   `--screenshot` は撮影後に自プロセスが終了するが、`--remote-debugging-port` を使う場合は
+   必ず後始末する。macOSに `timeout` コマンドは無いので前置しない（コマンドごと失敗する）
 4. `[警告]` が出たラベルだけ上記の規範で調整して再render
 5. GitHubで見せる場合はSVG（circuits/）ごとコミット
 
