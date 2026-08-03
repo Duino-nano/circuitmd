@@ -255,6 +255,8 @@ class Block:
     fence_end: int  # 閉じフェンスの行番号
     link_line: int | None  # 既存のマーカー付き画像リンク行（無ければNone）
     code: list[str] = field(default_factory=list)  # フェンス内の生テキスト
+    details_open: int | None = None  # フェンスを囲む <details> 行（無ければNone）
+    details_close: int | None = None  # 対応する </details> 行
 
 
 def parse_blocks(lines: list[str]) -> list[Block]:
@@ -284,19 +286,44 @@ def parse_blocks(lines: list[str]) -> list[Block]:
             m = FENCE_RE.match(line)
             if m and m.group(2) == "" and len(m.group(1)) >= fence_ticks:
                 if is_circuit:
+                    d_open, d_close = find_details(lines, start, i)
                     blocks.append(
                         Block(
                             index=len(blocks) + 1,
                             fence_start=start,
                             fence_end=i,
-                            link_line=find_link_line(lines, i),
+                            link_line=find_link_line(lines, d_close if d_close is not None else i),
                             code=code,
+                            details_open=d_open,
+                            details_close=d_close,
                         )
                     )
                 in_fence = False
             elif is_circuit:
                 code.append(line)
     return blocks
+
+
+def find_details(lines: list[str], fence_start: int, fence_end: int) -> tuple[int | None, int | None]:
+    """フェンスを囲む <details>/</details> の行番号を返す（無ければNone）。
+
+    GitHubでは構文を畳んで回路図だけ見せたいので、renderはフェンスを
+    <details> で包む。既に包まれている場合は二重に包まないための検出。
+    """
+    open_at = close_at = None
+    for i in range(fence_start - 1, max(fence_start - 4, -1), -1):
+        if not lines[i].strip():
+            continue
+        if "<details" in lines[i]:
+            open_at = i
+        break
+    for i in range(fence_end + 1, min(fence_end + 4, len(lines))):
+        if not lines[i].strip():
+            continue
+        if "</details>" in lines[i]:
+            close_at = i
+        break
+    return (open_at, close_at) if open_at is not None and close_at is not None else (None, None)
 
 
 def find_link_line(lines: list[str], fence_end: int) -> int | None:
@@ -701,22 +728,38 @@ def render_block(
     return fname, title, None, warns
 
 
+DEFAULT_SUMMARY = "<details><summary>回路コード</summary>"
+
+
 def apply_links(lines: list[str], results: list[tuple[Block, str | None, str]]) -> list[str]:
-    """画像リンクを挿入/置換する。行番号がずれないよう末尾のブロックから処理する。"""
+    """フェンスを <details> で畳み、その直後に画像リンクを置いた形に整える。
+
+    GitHubでは構文を折りたたんで回路図だけを見せ、編集時はフェンスをそのまま
+    書き換えられるようにするため。ブロックの領域ごと組み立て直すので、
+    何度実行しても同じ形になる（冪等）。行番号がずれないよう末尾から処理する。
+    """
     lines = list(lines)
     for block, fname, title in reversed(results):
         if fname is None:
-            continue  # エラーブロックは既存リンクをそのまま残す
+            continue  # エラーブロックは既存の見た目をそのまま残す
         safe_title = title.replace("[", "").replace("]", "")
         link = f"![{safe_title}](circuits/{fname}){MARKER}"
-        if block.link_line is not None:
-            lines[block.link_line] = link
-        else:
-            insertion = ["", link]
-            nxt = block.fence_end + 1
-            if nxt < len(lines) and lines[nxt].strip():
-                insertion.append("")  # 直後に本文が続くなら段落を分ける
-            lines[block.fence_end + 1 : block.fence_end + 1] = insertion
+        summary = (
+            lines[block.details_open] if block.details_open is not None else DEFAULT_SUMMARY
+        )
+        fence = lines[block.fence_start : block.fence_end + 1]
+
+        # 置き換える範囲: <details>（あれば）〜 既存の画像リンク（あれば）まで
+        start = block.details_open if block.details_open is not None else block.fence_start
+        end = block.details_close if block.details_close is not None else block.fence_end
+        if block.link_line is not None and block.link_line > end:
+            end = block.link_line
+
+        region = [summary, "", *fence, "", "</details>", "", link]
+        nxt = end + 1
+        if nxt < len(lines) and lines[nxt].strip():
+            region.append("")  # 直後に本文が続くなら段落を分ける
+        lines[start : end + 1] = region
     return lines
 
 

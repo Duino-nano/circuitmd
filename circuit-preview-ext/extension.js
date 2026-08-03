@@ -161,6 +161,24 @@ exports.activate = function () {
         return defaultFence(tokens, idx, options, env, self);
       };
 
+      // render が付ける <details> は、GitHubで構文を畳んで回路図だけ見せるためのもの。
+      // 編集中のプレビューでは図が見えないと困るので、circuitフェンスを含む details は
+      // open 属性を足して展開状態で表示する（mdファイル自体は書き換えない）。
+      md.core.ruler.push("open_circuit_details", (state) => {
+        const toks = state.tokens;
+        for (let i = 0; i < toks.length; i++) {
+          const t = toks[i];
+          if (t.type !== "html_block" || !/<details(?![^>]*\bopen\b)/.test(t.content)) continue;
+          for (let j = i + 1; j < toks.length; j++) {
+            if (toks[j].type === "html_block" && toks[j].content.includes("</details>")) break;
+            if (toks[j].type === "fence" && toks[j].info.trim() === "circuit") {
+              t.content = t.content.replace("<details", "<details open");
+              break;
+            }
+          }
+        }
+      });
+
       // circuitmd.py render が挿入した ![...](circuits/xxx.svg)<!-- circuit:auto --> は
       // プレビューではフェンス側で描画済みなので隠す（二重表示防止）
       md.core.ruler.push("hide_circuit_auto_links", (state) => {

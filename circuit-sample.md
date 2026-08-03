@@ -9,6 +9,8 @@
 
 ## 1. LED駆動回路（基本形）
 
+<details><summary>回路コード</summary>
+
 ```circuit
 title: LED駆動回路
 電源 3.3V ↑
@@ -18,11 +20,15 @@ LED LED1 ↓ loc=下
 GND
 ```
 
+</details>
+
 ![LED駆動回路](circuits/circuit-sample-1-1e287e41.svg)<!-- circuit:auto -->
 
 ## 2. GPIOプルアップ＋タクトスイッチ
 
 `分岐` で現在位置を保存し、枝を描いたら `合流` で戻る。
+
+<details><summary>回路コード</summary>
 
 ```circuit
 title: GPIOプルアップ回路
@@ -36,12 +42,16 @@ VDD 3.3V
 GND
 ```
 
+</details>
+
 ![GPIOプルアップ回路](circuits/circuit-sample-2-55b5fb30.svg)<!-- circuit:auto -->
 
 ## 3. NPNトランジスタによるモータ駆動
 
 先頭ラベルが英数字名（Q1など）ならその名前の変数になり、`@Q1.base` のように接続できる。
 表示したくない名前は `部品:変数名` で付ける（例: `ダイオード:FW`）。
+
+<details><summary>回路コード</summary>
 
 ```circuit
 title: NPNモータ駆動回路
@@ -58,6 +68,8 @@ VDD 5V @M.end
 線 ← @FW.end len=1.5
 ```
 
+</details>
+
 ![NPNモータ駆動回路](circuits/circuit-sample-3-357a306e.svg)<!-- circuit:auto -->
 
 ## 4. 非安定マルチバイブレーター（LED交互点滅）
@@ -69,6 +81,8 @@ VDD 5V @M.end
 対称レイアウトは `@(x,y)` の座標指定で組む（座標はスペースを入れず書く）。
 トランジスタの向き反転（`.reverse()`=左右、`.flip()`=上下でC/Eが入れ替わる）など
 細かい制御は素のschemdraw行で書き、残りはDSLで書く「混在スタイル」の例。
+
+<details><summary>回路コード</summary>
 
 ```circuit
 title: 非安定マルチバイブレーター（LED交互点滅）
@@ -103,5 +117,7 @@ jy = c1tap.center.y
 線 ← tox=@q1.base
 線 ↓ toy=@q1.base
 ```
+
+</details>
 
 ![非安定マルチバイブレーター（LED交互点滅）](circuits/circuit-sample-4-67064b95.svg)<!-- circuit:auto -->
