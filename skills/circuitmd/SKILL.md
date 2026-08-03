@@ -41,10 +41,14 @@ GND
 ````
 
 - **方向**: `→ ← ↑ ↓`（`right/left/up/down`・`右/左/上/下` でも可）
-- **部品名**: `抵抗/R` `コンデンサ/C` `電解コンデンサ/CP` `コイル/L` `LED` `ダイオード/D`
-  `ツェナー/ZD` `スイッチ/SW` `ボタン/BTN` `電源/V` `電池/BAT` `GND` `VDD/VCC` `点/DOT`
-  `線/W` `NPN` `PNP` `NMOS` `PMOS` `オペアンプ/OPAMP` `モータ/MOTOR` `スピーカ/SPK`
-  `水晶/XTAL` `ヒューズ/FUSE` `可変抵抗/POT`
+- **部品名**: 日本語・略号・英語いずれも可（大文字小文字は不問）。
+  `抵抗/R/resistor` `コンデンサ/C/capacitor` `電解コンデンサ/CP/polarcap` `コイル/L/inductor`
+  `LED` `ダイオード/D/diode` `ツェナー/ZD/zener` `ショットキー/SBD/schottky`
+  `スイッチ/SW/switch` `ボタン/BTN/button` `電源/V/source` `電池/BAT/battery`
+  `GND/ground` `VDD/VCC` `点/DOT/dot` `線/W/line` `NPN` `PNP` `NMOS` `PMOS`
+  `オペアンプ/OPAMP/opamp` `モータ/MOTOR/motor` `スピーカ/SPK/speaker` `水晶/XTAL/crystal`
+  `ヒューズ/FUSE/fuse` `可変抵抗/POT/potentiometer` `ランプ/LAMP/lamp`
+  ※`トランジスタ`/`FET` は曖昧なので不可 → NPN/PNP/NMOS/PMOS から選ぶ
 - **接続**: `@Q1.base` `@(2,1.5)`（座標はスペースなし）。アンカーはBJTが `.base/.collector/.emitter`、
   FETが `.gate/.drain/.source`、2端子素子が `.start/.end`
 - **変数名**: 先頭ラベル語が英数字名なら変数になる（`NPN Q1` → `@Q1.base` で参照）。
@@ -54,6 +58,9 @@ GND
   `ofst=0.4`（ラベルを線から離す） `rev`（左右反転） `flip`（上下反転）
 - 1行目 `title: 回路名` は画像のalt（省略可）
 - ラベルの単位はΩ・µなどUnicode直書き（`$...$` のLaTeX記法は不可）
+- **ラベル内に単独の `→ ← ↑ ↓` を書かない**（方向指定として解釈される）。
+  矢印付き文字列は `VOUT→LOAD` のように空白なしで書く
+- **配線は斜めにしない**。接続先の座標を揃え `tox=`/`toy=` で直交させる（斜めだと警告が出る）
 - **素のschemdraw記法（Python）と行単位で混在可**: `elm.` で始まる行は自動で `d += ` が付く。
   `q1 = d.add(elm.BjtNpn(circle=True).anchor('base').at((0,0)))` のような行もそのまま書ける。
   IC定義は `elm.Ic(pins=[elm.IcPin(name='OUT', side='right'), ...])`
@@ -82,6 +89,7 @@ GND
 
 - **要素は直前の描画方向を継承して回転する**。直前が `線 ↓` の状態で `elm.NFet()` を置くと
   FETが90度倒れる → **`.right()` を明示**してから `.reverse()` / `.anchor()` を付ける。
+  （DSLの `NMOS Q1` 等はツールが自動で `.right()` を補うので発生しない）
   `elm.NFet()` は既定でゲートが**右**（左にしたいなら `.right().reverse()`）
 - **`elm.Label(label='X')` はテキストが二重描画される** → `elm.Label().at(...).label('X')` の
   メソッド形式で書く

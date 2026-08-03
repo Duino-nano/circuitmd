@@ -122,6 +122,11 @@ IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
 
 
+# 向きが読み手に伝わる多端子素子。schemdrawは「直前の要素の描画方向」を引き継ぐため、
+# 直前が `線 ↓` だとトランジスタが90度倒れる。方向指定が無ければ .right() を補って
+# 常に同じ向きで描く（書き手が方向を明示した場合はそちらを優先）。
+DSL_NEEDS_DIRECTION = ("BjtNpn", "BjtPnp", "NFet", "PFet", "Opamp")
+
 # 素のPython行として書かれたと判断する手がかり（この形ならPythonのエラーをそのまま出す）
 PY_LINE_RE = re.compile(
     r"^\s*(?:elm|logic|flow|dsp|d)\b|[=(\[]|^\s*(?:for|if|while|import|from|def|print|return)\b"
@@ -195,9 +200,11 @@ def translate_dsl(line: str) -> str | None:
     label_parts: list[str] = []
     label_loc = None
     label_ofst = None
+    has_direction = False
     for tok in tokens[1:]:
         m = DSL_OPT_RE.match(tok)
         if tok in DSL_DIRECTIONS:
+            has_direction = True
             calls.append(f".{DSL_DIRECTIONS[tok]}()")
         elif tok.startswith("@"):
             calls.append(f".at({_dsl_ref(tok)})")
@@ -226,6 +233,10 @@ def translate_dsl(line: str) -> str | None:
         # 先頭ラベル語が識別子なら変数名を兼ねる（例: NPN Q1 → 変数Q1）
         if not name and IDENT_RE.match(label_parts[0]) and label_parts[0] not in RESERVED_NAMES:
             name = label_parts[0]
+
+    # 多端子素子は方向未指定なら .right() を補い、直前要素からの回転継承を防ぐ
+    if not has_direction and comp.startswith(DSL_NEEDS_DIRECTION):
+        calls.insert(0, ".right()")
 
     expr = "elm." + comp + "".join(calls)
     if name and IDENT_RE.match(name) and name not in RESERVED_NAMES:
@@ -566,7 +577,8 @@ def resolve_svg_overlaps(svg: str, margin: float = 10.0) -> tuple[str, list[str]
                 t.dx, t.dy = dx, dy
                 break
         else:
-            warnings.append(t.lines[0][0].strip() or "(無名ラベル)")
+            label = t.lines[0][0].strip() or "(無名ラベル)"
+            warnings.append(f"ラベル「{label}」の重なりを自動解消できませんでした（手動調整推奨）")
     for t in texts:
         t.apply()
 
@@ -682,7 +694,9 @@ def render_block(
     if not getattr(d, "elements", None):
         return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）", []
     out_dir.mkdir(exist_ok=True)
+    lint = lint_drawing(d)
     svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+    warns = lint + warns
     (out_dir / fname).write_text(svg, encoding="utf-8")
     return fname, title, None, warns
 
@@ -766,7 +780,7 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
             keep.add(fname)
             print(f"[OK] {md_path} ブロック{block.index} → circuits/{fname}")
             for w in warns:
-                print(f"  [警告] ブロック{block.index}: ラベル「{w}」の重なりを自動解消できませんでした（手動調整推奨）")
+                print(f"  [警告] ブロック{block.index}: {w}")
         results.append((block, fname, title))
 
     new_lines = apply_links(lines, results)
@@ -780,6 +794,30 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
 
 class CircuitError(Exception):
     """回路コードの構文・実行エラー（行番号付きメッセージ）。"""
+
+
+def lint_drawing(d) -> list[str]:
+    """描画結果の"読みにくさ"を検出する（回路の正しさは判定しない）。
+
+    斜めの配線は回路図として読みにくく、座標がずれた接続の兆候でもある。
+    素子の内部形状（抵抗のジグザグ等）は対象外で、配線（Line）だけを見る。
+    """
+    diagonals = 0
+    for el in getattr(d, "elements", []):
+        if type(el).__name__ != "Line":
+            continue
+        anchors = getattr(el, "absanchors", {}) or {}
+        start, end = anchors.get("start"), anchors.get("end")
+        if start is None or end is None:
+            continue
+        if abs(start[0] - end[0]) > 0.05 and abs(start[1] - end[1]) > 0.05:
+            diagonals += 1
+    if diagonals:
+        return [
+            f"斜めの配線が{diagonals}本あります。"
+            "接続先の座標がずれている可能性があります（tox=/toy= で直交させてください）"
+        ]
+    return []
 
 
 def render_source(code_text: str) -> tuple[str, list[str]]:
@@ -814,7 +852,9 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
     d = ns["d"]
     if not getattr(d, "elements", None):
         raise CircuitError("要素が0個です")
-    return postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+    lint = lint_drawing(d)
+    svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
+    return svg, lint + warns
 
 
 def cmd_svg() -> None:
@@ -824,7 +864,7 @@ def cmd_svg() -> None:
     except CircuitError as exc:
         sys.exit(str(exc))
     for w in warns:
-        print(f"[警告] ラベル「{w}」の重なりを自動解消できませんでした", file=sys.stderr)
+        print(f"[警告] {w}", file=sys.stderr)
     sys.stdout.write(svg)
 
 

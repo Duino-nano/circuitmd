@@ -58,7 +58,7 @@ VDD 5V @M.end
 線 ← @FW.end len=1.5
 ```
 
-![NPNモータ駆動回路](circuits/circuit-sample-3-9a23684e.svg)<!-- circuit:auto -->
+![NPNモータ駆動回路](circuits/circuit-sample-3-357a306e.svg)<!-- circuit:auto -->
 
 ## 4. 非安定マルチバイブレーター（LED交互点滅）
 
