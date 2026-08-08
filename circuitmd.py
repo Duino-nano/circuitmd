@@ -825,9 +825,13 @@ def render_block(
     if not getattr(d, "elements", None):
         return None, title, f"[NG] {md_path} ブロック{block.index}: 要素が0個です（描画をスキップ）", []
     out_dir.mkdir(exist_ok=True)
-    lint = lint_drawing(d)
+    allow_diag = any(ALLOW_DIAGONAL_RE.match(ln) for ln in block.code)
+    draw_errors, draw_warns = lint_drawing(d, allow_diag)
+    if draw_errors:
+        head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜): "
+        return None, title, "\n".join(head + e for e in draw_errors), []
     svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
-    warns = dsl_warns + lint + warns
+    warns = dsl_warns + draw_warns + warns
     (out_dir / fname).write_text(svg, encoding="utf-8")
     return fname, title, None, warns
 
@@ -953,27 +957,59 @@ class CircuitError(Exception):
     """回路コードの構文・実行エラー（行番号付きメッセージ）。"""
 
 
-def lint_drawing(d) -> list[str]:
-    """描画結果の"読みにくさ"を検出する（回路の正しさは判定しない）。
+ALLOW_DIAGONAL_RE = re.compile(r"^#\s*allow-diagonal\b")
 
-    斜めの配線は回路図として読みにくく、座標がずれた接続の兆候でもある。
-    素子の内部形状（抵抗のジグザグ等）は対象外で、配線（Line）だけを見る。
+
+def _element_name(el) -> str:
+    """エラー表示用に素子を特定する文字列（ラベルがあればそれを使う）。"""
+    labels = getattr(el, "_userlabels", None) or []
+    for lb in labels:
+        text = getattr(lb, "label", None)
+        if isinstance(text, str) and text.strip():
+            return f"「{text.strip()}」"
+    return type(el).__name__
+
+
+def lint_drawing(d, allow_diagonal: bool = False) -> tuple[list[str], list[str]]:
+    """描画結果の"読みにくさ"を (エラー, 警告) で返す（回路の正しさは判定しない）。
+
+    斜めに置かれた素子は、座標の揃っていない2点を `to=` でつないだ時にできる。
+    「つながりを書けば配置してくれる」という誤解の産物で、回路図として読めない
+    ものにしかならないのでエラーにする（ブリッジ整流のひし形など意図的に斜めへ
+    置きたい場合は、フェンス内に `# allow-diagonal` の行を入れる）。
+    斜めの配線は座標ずれの兆候ではあるが、意図的な場合もあるので警告に留める。
     """
-    diagonals = 0
+    parts: list[str] = []
+    wires = 0
     for el in getattr(d, "elements", []):
         anchors = getattr(el, "absanchors", {}) or {}
         start, end = anchors.get("start"), anchors.get("end")
         if start is None or end is None:
             continue  # start/end を持たない素子（トランジスタ・IC等）は対象外
-        if abs(start[0] - end[0]) > 0.05 and abs(start[1] - end[1]) > 0.05:
-            diagonals += 1
-    if diagonals:
-        return [
-            f"斜めに置かれた配線・素子が{diagonals}個あります。"
-            "接続先の座標がずれている可能性があります"
-            "（tox=/toy= で直交させる。to=@X は始点と終点のX or Yを揃えてから使う）"
-        ]
-    return []
+        if abs(start[0] - end[0]) <= 0.05 or abs(start[1] - end[1]) <= 0.05:
+            continue
+        if type(el).__name__ == "Line":
+            wires += 1
+        else:
+            parts.append(_element_name(el))
+
+    errors: list[str] = []
+    warns: list[str] = []
+    if parts and not allow_diagonal:
+        errors.append(
+            f"{'・'.join(parts)} が斜めに置かれています。"
+            "circuitmdは「つながり」ではなく「図形」を書く記法で、@始点 to=@終点 は"
+            "始点と終点のXかYが揃っているときにしか使えません。素子は 方向＋len= で置き、"
+            "離れた点へは 線 と tox=/toy= で直交させて届かせてください"
+            "（例: 抵抗 R1 1kΩ ↑ @Q1.drain len=2.5 → 線 → @R1.end tox=@R2.end）。"
+            "意図的に斜めへ置く場合はフェンス内に # allow-diagonal を書いてください"
+        )
+    if wires and not allow_diagonal:
+        warns.append(
+            f"斜めの配線が{wires}本あります。接続先の座標がずれている可能性があります"
+            "（tox=/toy= で直交させてください）"
+        )
+    return errors, warns
 
 
 def render_source(code_text: str) -> tuple[str, list[str]]:
@@ -1011,9 +1047,12 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
     d = ns["d"]
     if not getattr(d, "elements", None):
         raise CircuitError("要素が0個です")
-    lint = lint_drawing(d)
+    allow_diag = any(ALLOW_DIAGONAL_RE.match(ln) for ln in code_lines)
+    draw_errors, draw_warns = lint_drawing(d, allow_diag)
+    if draw_errors:
+        raise CircuitError("\n".join(draw_errors))
     svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
-    return svg, dsl_warns + lint + warns
+    return svg, dsl_warns + draw_warns + warns
 
 
 def cmd_svg() -> None:
