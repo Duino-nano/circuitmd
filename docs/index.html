@@ -155,13 +155,20 @@ const AI_PROMPT = `あなたは回路図を「circuitmd記法」で書きます�
   NPN PNP NMOS PMOS オペアンプ/opamp モータ/motor スピーカ/speaker 水晶/crystal
   可変抵抗/potentiometer ランプ/lamp
   ※「トランジスタ」「FET」だけでは特定できない → NPN/PNP/NMOS/PMOS から選ぶ
+【1行1部品】1行に部品名を2つ書いても端子は生えず、2つ目はラベル文字になる。
+  誤: NMOS Q1 ↓ GND ／ 正: NMOS Q1 の次の行に GND @Q1.source
 【接続】@Q1.base のようにアンカー参照（BJT: base/collector/emitter、
-  FET: gate/drain/source、2端子素子: start/end）。座標指定は @(2,1.5)（スペース禁止）
+  FET: gate/drain/source、2端子素子: start/end）。座標指定は @(2,1.5)（スペース禁止）。
+  @ は「素子の起点」で1行に1つだけ（2つ書くとエラー）。2点間に渡す素子は @始点 to=@終点
+  （例: 電解コンデンサ C1 100µF @Q1.drain to=@Q2.gate）。to= はX or Yを揃えてから使う
 【変数】先頭ラベルが英数字名なら変数になる（NPN Q1 → @Q1.base で参照）。
   表示したくない名前は 点:b1 のように 部品:変数名 で付ける
 【分岐】分岐 … 合流 で枝を描く。分岐点には「点」を打つ
-【オプション】loc=下（ラベル位置） len=1.5（長さ） tox=@X.end toy=@Y.end
+【オプション】loc=下（ラベル位置） len=1.5（長さ） tox=@X.end toy=@Y.end to=@X.end
   ofst=0.4（ラベルを線から離す） rev（左右反転） flip（上下反転）
+  ※これ以外の key=値 はオプションにならず、そのままラベル文字として描かれる
+【姿勢】NPN/PNP/NMOS/PMOS/オペアンプ に方向（→←↑↓）を付けない。
+  方向は素子ごと回転させるだけで接続方向は変わらない。反転は rev / flip を使う
 【配線】斜めにしない。接続先の座標を揃え、tox=@X.end / toy=@Y.end で直交させる
 【注意】ラベル内に単独の → ← ↑ ↓ を書かない（方向指定として解釈される）。
   矢印付きの文字列は VOUT→LOAD のように空白を入れずに書く

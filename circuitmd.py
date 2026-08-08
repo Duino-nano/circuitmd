@@ -117,7 +117,14 @@ DSL_DIRECTIONS = {
 DSL_LOC = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
 DSL_PUSH = {"分岐", "push"}
 DSL_POP = {"合流", "戻る", "pop"}
-DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy|ofst)=(.+)$")
+DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy|ofst|to|at)=(.+)$")
+# 「key=value」の形をしているのにオプションではない語（黙ってラベルにされると気づけない）
+DSL_OPTLIKE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+DSL_OPT_HELP = "len= loc= tox= toy= ofst= to= at=（rev / flip は値なし）"
+# 部品としてしか書かれない語。デバイス行の末尾に付けても端子は生えず、ラベルになるだけ
+DSL_TERMINAL_WORDS = {
+    "GND", "gnd", "ground", "グランド", "VDD", "vdd", "VCC", "vcc", "VSS", "vss",
+}
 IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESERVED_NAMES = {"d", "elm", "logic", "flow", "dsp", "math", "schemdraw"}
 
@@ -175,8 +182,68 @@ def diagnose_line(line: str) -> str | None:
     )
 
 
-def translate_dsl(line: str) -> str | None:
-    """DSL行を schemdraw のPython 1行に変換する。DSLでなければ None。"""
+def _is_component_word(tok: str) -> bool:
+    return tok in DSL_COMPONENTS or tok.upper() in DSL_COMPONENTS or tok.lower() in DSL_COMPONENTS
+
+
+def _diagnose_dsl(
+    diag: list[tuple[str, str]],
+    head: str,
+    name: str,
+    comp: str,
+    has_direction: bool,
+    n_at: int,
+    n_dir: int,
+    optlike: list[str],
+    after_dir: list[str],
+) -> None:
+    """構文としては通るが、書き手の意図と違う図になる書き方を指摘する。
+
+    DSLは知らない語をすべてラベルに落とすため、綴り違いや「1行に2部品」を
+    黙って飲み込んでしまう。それが図の破綻としてしか現れないと（特にAIは）
+    自己修正できないので、ここで言葉にして返す。
+    """
+    if n_at > 1:
+        diag.append((
+            "error",
+            "1行に @接続先 を複数書くことはできません（後の指定が前を打ち消し、"
+            "素子が意図しない場所に飛びます）。起点は1つだけにして、2点間に渡す"
+            "素子は 素子 ラベル @始点 to=@終点 と書いてください",
+        ))
+    if n_dir > 1:
+        diag.append(("error", "1行に方向を複数書くことはできません（最後の1つだけが効きます）"))
+    for tok in optlike:
+        diag.append((
+            "warn",
+            f"「{tok}」はオプションとして解釈されず、ラベル文字として図に描かれます。"
+            f"使えるオプション: {DSL_OPT_HELP}",
+        ))
+    # 「NMOS Q1 ↓ GND」のように部品名を並べても端子は生えず、ただのラベルになる
+    terminals = [t for t in after_dir if _is_component_word(t)]
+    if comp.startswith(DSL_NEEDS_DIRECTION):
+        terminals += [t for t in after_dir if t in DSL_TERMINAL_WORDS and t not in terminals]
+    for tok in dict.fromkeys(terminals):
+        diag.append((
+            "warn",
+            f"「{tok}」は部品名なので、この行のラベル文字として描かれるだけです"
+            f"（1行に書ける部品は1つ）。部品として置くなら行を分けてください"
+            f"（例: {tok} @{name or head}.source）",
+        ))
+    if has_direction and comp.startswith(DSL_NEEDS_DIRECTION):
+        diag.append((
+            "warn",
+            f"多端子素子「{head}」に方向を指定すると、素子の姿勢そのものが回転します"
+            "（端子の接続先は変わりません）。縦置きにしたいのでなければ方向は省き、"
+            "接続は @素子名.gate などのアンカー参照で行ってください",
+        ))
+
+
+def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str | None:
+    """DSL行を schemdraw のPython 1行に変換する。DSLでなければ None。
+
+    diag を渡すと、構文としては通るが黙って別の意味に解釈される書き方を
+    (レベル, メッセージ) で追記する（レベルは "error" / "warn"）。
+    """
     if line[:1] in (" ", "\t"):  # インデント行（forループ本体など）は対象外
         return None
     tokens = line.split()
@@ -201,12 +268,18 @@ def translate_dsl(line: str) -> str | None:
     label_loc = None
     label_ofst = None
     has_direction = False
+    n_at = 0  # 起点指定（@X / at=X）の数。2つ以上あると後勝ちで図が壊れる
+    n_dir = 0
+    optlike: list[str] = []  # オプションのつもりでラベルになった語
+    after_dir: list[str] = []  # 方向より後ろに書かれたラベル語
     for tok in tokens[1:]:
         m = DSL_OPT_RE.match(tok)
         if tok in DSL_DIRECTIONS:
             has_direction = True
+            n_dir += 1
             calls.append(f".{DSL_DIRECTIONS[tok]}()")
         elif tok.startswith("@"):
+            n_at += 1
             calls.append(f".at({_dsl_ref(tok)})")
         elif tok in ("flip", "上下反転"):
             calls.append(".flip()")
@@ -220,10 +293,17 @@ def translate_dsl(line: str) -> str | None:
                 label_loc = DSL_LOC.get(val, val)
             elif key == "ofst":  # ラベルを線から離す。数値 or (x,y)（スペースなし）
                 label_ofst = val
-            else:  # tox / toy
+            elif key == "at":
+                n_at += 1
+                calls.append(f".at({_dsl_ref(val)})")
+            else:  # tox / toy / to
                 calls.append(f".{key}({_dsl_ref(val)})")
         else:
             label_parts.append(tok)
+            if DSL_OPTLIKE_RE.match(tok):
+                optlike.append(tok)
+            elif has_direction:
+                after_dir.append(tok)
 
     if label_parts:
         text = " ".join(label_parts).replace("'", "\\'")
@@ -234,6 +314,9 @@ def translate_dsl(line: str) -> str | None:
         if not name and IDENT_RE.match(label_parts[0]) and label_parts[0] not in RESERVED_NAMES:
             name = label_parts[0]
 
+    if diag is not None:
+        _diagnose_dsl(diag, head, name, comp, has_direction, n_at, n_dir, optlike, after_dir)
+
     # 多端子素子は方向未指定なら .right() を補い、直前要素からの回転継承を防ぐ
     if not has_direction and comp.startswith(DSL_NEEDS_DIRECTION):
         calls.insert(0, ".right()")
@@ -242,6 +325,23 @@ def translate_dsl(line: str) -> str | None:
     if name and IDENT_RE.match(name) and name not in RESERVED_NAMES:
         return f"{name} = d.add({expr})"
     return f"d += {expr}"
+
+
+def lint_dsl_text(code_lines: list[str]) -> tuple[list[str], list[str]]:
+    """フェンス内テキストだけを見て (エラー, 警告) を返す。
+
+    schemdrawを使わないので check（構文チェックのみ）でも同じ指摘が出せる。
+    """
+    errors: list[str] = []
+    warns: list[str] = []
+    for i, line in enumerate(code_lines, 1):
+        diag: list[tuple[str, str]] = []
+        translate_dsl(line, diag)
+        for level, msg in diag:
+            (errors if level == "error" else warns).append(f"{i}行目「{line.strip()}」: {msg}")
+    return errors, warns
+
+
 LINK_FNAME_RE = re.compile(r"\(circuits/([^)]+\.svg)\)")
 EXCLUDE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", ".next"}
 
@@ -704,9 +804,13 @@ def render_block(
     """1ブロックをSVGにする。(SVGファイル名, title, エラー文, 重なり警告) を返す。"""
     src, title = transform(block.code)
     title = title or f"circuit {block.index}"
+    dsl_errors, dsl_warns = lint_dsl_text(block.code)
+    if dsl_errors:
+        head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜) 内 "
+        return None, title, "\n".join(head + e for e in dsl_errors), []
     fname = f"{md_path.stem}-{block.index}-{hash8(src)}.svg"
     if (out_dir / fname).exists():
-        return fname, title, None, []  # 内容不変なら再生成しない
+        return fname, title, None, dsl_warns  # 内容不変なら再生成しない
 
     compile_name = f"<{md_path.name}#block{block.index}>"
     ns = dict(base_ns)
@@ -723,7 +827,7 @@ def render_block(
     out_dir.mkdir(exist_ok=True)
     lint = lint_drawing(d)
     svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
-    warns = lint + warns
+    warns = dsl_warns + lint + warns
     (out_dir / fname).write_text(svg, encoding="utf-8")
     return fname, title, None, warns
 
@@ -790,10 +894,20 @@ def check_file(md_path: Path, blocks: list[Block]) -> int:
         compile_name = f"<{md_path.name}#block{block.index}>"
         try:
             compile(src, compile_name, "exec")
-            print(f"[OK] {md_path} ブロック{block.index}")
         except SyntaxError as exc:
             errors += 1
             print(block_error_report(md_path, block, exc, compile_name))
+            continue
+        dsl_errors, dsl_warns = lint_dsl_text(block.code)
+        if dsl_errors:
+            errors += 1
+            head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜) 内 "
+            for e in dsl_errors:
+                print(head + e)
+        else:
+            print(f"[OK] {md_path} ブロック{block.index}")
+        for w in dsl_warns:
+            print(f"  [警告] ブロック{block.index}: {w}")
     return errors
 
 
@@ -847,18 +961,17 @@ def lint_drawing(d) -> list[str]:
     """
     diagonals = 0
     for el in getattr(d, "elements", []):
-        if type(el).__name__ != "Line":
-            continue
         anchors = getattr(el, "absanchors", {}) or {}
         start, end = anchors.get("start"), anchors.get("end")
         if start is None or end is None:
-            continue
+            continue  # start/end を持たない素子（トランジスタ・IC等）は対象外
         if abs(start[0] - end[0]) > 0.05 and abs(start[1] - end[1]) > 0.05:
             diagonals += 1
     if diagonals:
         return [
-            f"斜めの配線が{diagonals}本あります。"
-            "接続先の座標がずれている可能性があります（tox=/toy= で直交させてください）"
+            f"斜めに置かれた配線・素子が{diagonals}個あります。"
+            "接続先の座標がずれている可能性があります"
+            "（tox=/toy= で直交させる。to=@X は始点と終点のX or Yを揃えてから使う）"
         ]
     return []
 
@@ -870,6 +983,9 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
     """
     code_lines = code_text.splitlines()
     base_ns = load_schemdraw()
+    dsl_errors, dsl_warns = lint_dsl_text(code_lines)
+    if dsl_errors:
+        raise CircuitError("\n".join(dsl_errors))
     src, _title = transform(code_lines)
     ns = dict(base_ns)
     ns["d"] = ns["schemdraw"].Drawing()
@@ -897,7 +1013,7 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
         raise CircuitError("要素が0個です")
     lint = lint_drawing(d)
     svg, warns = postprocess_svg(d.get_imagedata("svg").decode("utf-8"))
-    return svg, lint + warns
+    return svg, dsl_warns + lint + warns
 
 
 def cmd_svg() -> None:
