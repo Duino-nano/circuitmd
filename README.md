@@ -152,6 +152,8 @@ GND
 ```
 
 電源レールを持つ回路はこの骨格で書く（素子は方向＋長さ、レールは線で渡す）:
+<details><summary>回路コード</summary>
+
 ```circuit
 NMOS Q1 @(0,0)
 NMOS Q2 @(8,0) rev
@@ -161,6 +163,11 @@ GND @Q2.source
 抵抗 R2 1kΩ ↑ @Q2.drain len=2.5 loc=右
 線 → @R1.end tox=@R2.end
 ```
+
+</details>
+
+![circuit 1](circuits/README-1-94024872.svg)<!-- circuit:auto -->
+
 ```
 
 書かせた回路は https://duino-nano.github.io/circuitmd/ に貼れば図で確認できます。
