@@ -121,6 +121,13 @@ DSL_OPT_RE = re.compile(r"^(len|loc|tox|toy|ofst|to|at)=(.+)$")
 # 「key=value」の形をしているのにオプションではない語（黙ってラベルにされると気づけない）
 DSL_OPTLIKE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 DSL_OPT_HELP = "len= loc= tox= toy= ofst= to= at=（rev / flip は値なし）"
+# 2端子（始点と終点）を持たない素子。長さや終点という概念がないので len=/to=/tox=/toy= を
+# 呼ぶと schemdraw が「length not defined in Element」のような素の例外を投げる
+DSL_NO_LENGTH = (
+    "Ground()", "Vdd()", "Vss()", "Dot()", "Antenna()", "Speaker()",
+    "BjtNpn(", "BjtPnp(", "NFet()", "PFet()", "Opamp()",
+)
+DSL_SPAN_OPTS = ("len", "to", "tox", "toy")
 # 部品としてしか書かれない語。デバイス行の末尾に付けても端子は生えず、ラベルになるだけ
 DSL_TERMINAL_WORDS = {
     "GND", "gnd", "ground", "グランド", "VDD", "vdd", "VCC", "vcc", "VSS", "vss",
@@ -196,6 +203,8 @@ def _diagnose_dsl(
     n_dir: int,
     optlike: list[str],
     after_dir: list[str],
+    span_opts: list[str],
+    assigned: bool,
 ) -> None:
     """構文としては通るが、書き手の意図と違う図になる書き方を指摘する。
 
@@ -203,6 +212,22 @@ def _diagnose_dsl(
     黙って飲み込んでしまう。それが図の破綻としてしか現れないと（特にAIは）
     自己修正できないので、ここで言葉にして返す。
     """
+    if assigned:
+        diag.append((
+            "error",
+            f"DSLに代入（`{head} = ...`）はありません。この行は部品「{head}」を置く指示として"
+            "読まれ、= 以降はラベル文字になります。変数名は先頭のラベル語が自動で変数に"
+            "なります（例: `電源 VCC 5V ↑` と書けば `@VCC.start` で参照できる）。"
+            "表示したくない名前は `電源:VCC 5V ↑` のように 部品:変数名 で付けてください",
+        ))
+    if span_opts and comp.startswith(DSL_NO_LENGTH):
+        diag.append((
+            "error",
+            f"「{head}」は始点と終点を持たない素子なので "
+            f"{' / '.join(o + '=' for o in span_opts)} は使えません"
+            "（長さや終点を指定できるのは抵抗・コンデンサ・線などの2端子素子だけです）。"
+            "位置は @座標 やアンカー参照（@Q1.gate）で決め、長さが要る区間は `線` を使ってください",
+        ))
     if n_at > 1:
         diag.append((
             "error",
@@ -272,6 +297,8 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
     n_dir = 0
     optlike: list[str] = []  # オプションのつもりでラベルになった語
     after_dir: list[str] = []  # 方向より後ろに書かれたラベル語
+    span_opts: list[str] = []  # 始点と終点がないと成立しないオプション
+    assigned = tokens[1:2] == ["="]  # `VCC = 電源 …` のような代入もどき
     for tok in tokens[1:]:
         m = DSL_OPT_RE.match(tok)
         if tok in DSL_DIRECTIONS:
@@ -287,6 +314,8 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
             calls.append(".reverse()")
         elif m:
             key, val = m.group(1), m.group(2)
+            if key in DSL_SPAN_OPTS:
+                span_opts.append(key)
             if key == "len":
                 calls.append(f".length({val})")
             elif key == "loc":
@@ -315,7 +344,10 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
             name = label_parts[0]
 
     if diag is not None:
-        _diagnose_dsl(diag, head, name, comp, has_direction, n_at, n_dir, optlike, after_dir)
+        _diagnose_dsl(
+            diag, head, name, comp, has_direction, n_at, n_dir, optlike, after_dir,
+            span_opts, assigned,
+        )
 
     # 多端子素子は方向未指定なら .right() を補い、直前要素からの回転継承を防ぐ
     if not has_direction and comp.startswith(DSL_NEEDS_DIRECTION):
@@ -839,19 +871,39 @@ def render_block(
 DEFAULT_SUMMARY = "<details><summary>回路コード</summary>"
 
 
-def apply_links(lines: list[str], results: list[tuple[Block, str | None, str]]) -> list[str]:
-    """フェンスを <details> で畳み、その直後に画像リンクを置いた形に整える。
+NOTICE_HEAD_RE = re.compile(r"^\[NG\]\s*\S+\s*ブロック\d+\s*\(md \d+行目〜\)\s*(?:内\s*)?:?\s*")
+
+
+def error_notice(err: str) -> str:
+    """失敗したブロックの位置に置く1行の警告。
+
+    エラー時に前回の画像を残すと、ドキュメントは成功したように見えてしまい、
+    書き手（特にAI）は端末の出力を読み飛ばして「完了」と判断してしまう。
+    失敗を成果物そのものに書き込むことで、ファイルを読み返せば必ず気づけるようにする。
+    """
+    # 「どのファイルのどのブロックか」は警告が置かれる場所そのものなので落とす
+    parts = [
+        NOTICE_HEAD_RE.sub("", part.strip())
+        for part in err.splitlines()
+        if part.strip()
+    ]
+    return f"> ⚠️ **回路図を生成できませんでした** — {' / '.join(parts)}{MARKER}"
+
+
+def apply_links(lines: list[str], results: list[tuple[Block, str | None, str, str | None]]) -> list[str]:
+    """フェンスを <details> で畳み、その直後に画像リンク（失敗時は警告）を置く。
 
     GitHubでは構文を折りたたんで回路図だけを見せ、編集時はフェンスをそのまま
     書き換えられるようにするため。ブロックの領域ごと組み立て直すので、
     何度実行しても同じ形になる（冪等）。行番号がずれないよう末尾から処理する。
     """
     lines = list(lines)
-    for block, fname, title in reversed(results):
+    for block, fname, title, err in reversed(results):
         if fname is None:
-            continue  # エラーブロックは既存の見た目をそのまま残す
-        safe_title = title.replace("[", "").replace("]", "")
-        link = f"![{safe_title}](circuits/{fname}){MARKER}"
+            link = error_notice(err or "原因不明のエラー")
+        else:
+            safe_title = title.replace("[", "").replace("]", "")
+            link = f"![{safe_title}](circuits/{fname}){MARKER}"
         summary = (
             lines[block.details_open] if block.details_open is not None else DEFAULT_SUMMARY
         )
@@ -933,16 +985,12 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
         if err:
             errors += 1
             print(err)
-            # エラー時は既存リンクが指すSVGを掃除対象から守る
-            old = existing_svg_name(lines, block)
-            if old:
-                keep.add(old)
         else:
             keep.add(fname)
             print(f"[OK] {md_path} ブロック{block.index} → circuits/{fname}")
             for w in warns:
                 print(f"  [警告] ブロック{block.index}: {w}")
-        results.append((block, fname, title))
+        results.append((block, fname, title, err))
 
     new_lines = apply_links(lines, results)
     new_text = "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
