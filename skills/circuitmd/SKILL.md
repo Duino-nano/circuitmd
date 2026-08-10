@@ -113,6 +113,8 @@ GND
 
 DSLにICは無いので素のschemdrawで書く。ここは踏み外しが多いので定型を守ること。
 
+<details><summary>回路コード</summary>
+
 ```circuit
 # ① 必ず d.add() で図に追加し、戻り値を変数で受ける
 IC1 = d.add(elm.Ic(pins=[
@@ -125,6 +127,10 @@ IC1 = d.add(elm.Ic(pins=[
 # ② アンカーは @変数.ピン名 で参照する（DSL行でもそのまま使える）
 抵抗 R1 1kΩ ↑ @IC1.DISCH len=2 loc=右
 ```
+
+</details>
+
+![circuit 1](circuits/SKILL-1-147afa86.svg)<!-- circuit:auto -->
 
 - **`IC1 = elm.Ic(...)` だけでは図に追加されない**。追加していない素子はアンカーを持たず、
   `@IC1.DISCH` は `AttributeError: DISCH not defined in Element` になる。
