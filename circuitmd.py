@@ -263,6 +263,48 @@ def _diagnose_dsl(
         ))
 
 
+NOT_DEFINED_RE = re.compile(r"^(\w+) not defined in Element$")
+
+
+def diagnose_exception(exc: Exception, line: str) -> str | None:
+    """実行時例外に、circuitmd の文脈での原因を付ける。
+
+    schemdraw の素の例外（`DISCH not defined in Element` など）だけでは
+    書き手が原因にたどり着けず、アンカー名を変える・setattr する等の
+    見当違いな修正ループに陥る。実際に起きた誤解を名指しで潰す。
+    """
+    # 素子そのものを座標として渡すと、schemdrawが座標の添字を引きに行って落ちる
+    if isinstance(exc, KeyError) and str(exc) in ("0", "1"):
+        return (
+            "座標が要る場所に素子そのものを渡しています。"
+            "`@R1` ではなく `@R1.end`、`@P1`（点）ではなく `@P1.center` のように"
+            "アンカーまで指定してください（2端子素子は .start/.end、点は .center、"
+            "BJTは .base/.collector/.emitter、FETは .gate/.drain/.source）"
+        )
+    if not isinstance(exc, AttributeError):
+        return None
+    m = NOT_DEFINED_RE.match(str(exc))
+    if not m:
+        return None
+    name = m.group(1)
+    if name == "length":
+        return (
+            "len= は始点と終点を持つ2端子素子（抵抗・コンデンサ・線など）専用です。"
+            "GND・VDD・点・トランジスタ・IC には使えません"
+        )
+    return (
+        f"アンカー「{name}」を参照できません。原因はほぼ次のどれかです: "
+        "①素子を図に追加していない — `IC1 = elm.Ic(...)` だけではアンカーは生えません。"
+        "`IC1 = d.add(elm.Ic(...))` と書いてください "
+        "②`.anchor('名前')` を座標の取得に使っている — これは「どのアンカーを基準に置くか」を"
+        "設定するメソッドで、返るのは座標ではなく素子自身です。座標は `@IC1.DISCH`"
+        "（素のPythonなら `IC1.DISCH`）で取ります "
+        "③ピン名がPythonの識別子として書けない（`V+` や `2` など）— その場合だけ "
+        "`IC1.absanchors['V+']` を使ってください。"
+        "なお `anchorname=` の追加や `setattr()` での差し込みは解決になりません"
+    )
+
+
 def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str | None:
     """DSL行を schemdraw のPython 1行に変換する。DSLでなければ None。
 
@@ -359,18 +401,42 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
     return f"d += {expr}"
 
 
+# 素のschemdraw行でよくある取り違え
+ELEM_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(?:elm|logic|flow|dsp)\.")
+ANCHOR_AS_POINT_RE = re.compile(r"\.(?:at|to|tox|toy)\([^)]*\.anchor\(")
+
+
 def lint_dsl_text(code_lines: list[str]) -> tuple[list[str], list[str]]:
     """フェンス内テキストだけを見て (エラー, 警告) を返す。
 
-    schemdrawを使わないので check（構文チェックのみ）でも同じ指摘が出せる。
+    schemdrawを使わない検査なので、描画エンジンが無い環境でも同じ指摘が出せる。
     """
     errors: list[str] = []
     warns: list[str] = []
+    text = "\n".join(code_lines)
     for i, line in enumerate(code_lines, 1):
+        where = f"{i}行目「{line.strip()}」: "
         diag: list[tuple[str, str]] = []
         translate_dsl(line, diag)
         for level, msg in diag:
-            (errors if level == "error" else warns).append(f"{i}行目「{line.strip()}」: {msg}")
+            (errors if level == "error" else warns).append(where + msg)
+
+        if ANCHOR_AS_POINT_RE.search(line):
+            errors.append(
+                where + "`.anchor('名前')` は座標を返しません（「どのアンカーを基準に置くか」を"
+                "設定して素子自身を返すメソッドです）。座標は `IC1.DISCH` のように"
+                "属性で取ってください（DSL側なら `@IC1.DISCH`）"
+            )
+        m = ELEM_ASSIGN_RE.match(line)
+        if m:
+            var = m.group(1)
+            added = re.search(rf"d\s*\+=\s*{re.escape(var)}\b|d\.add\(\s*{re.escape(var)}\b", text)
+            if not added:
+                errors.append(
+                    where + f"素子を変数「{var}」に入れただけでは図に追加されず、"
+                    f"アンカー（`@{var}.OUT` など）も参照できません。"
+                    f"`{var} = d.add(elm....)` と書いてください"
+                )
     return errors, warns
 
 
@@ -820,7 +886,8 @@ def block_error_report(md_path: Path, block: Block, exc: Exception, compile_name
                 lineno = frame.lineno  # 最後に一致したフレーム＝ブロック内の行
     msg = f"{type(exc).__name__}: {exc}"
     if lineno is not None and 1 <= lineno <= len(block.code):
-        msg = diagnose_line(block.code[lineno - 1]) or msg
+        line = block.code[lineno - 1]
+        msg = diagnose_exception(exc, line) or diagnose_line(line) or msg
     head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜)"
     if lineno is not None:
         report = f"{head} 内 {lineno}行目: {msg}"
@@ -942,27 +1009,49 @@ def cleanup_svgs(out_dir: Path, stem: str, keep: set[str]) -> None:
             print(f"  （旧SVGを削除: circuits/{f.name}）")
 
 
-def check_file(md_path: Path, blocks: list[Block]) -> int:
-    """構文チェックのみ。実行時エラー（NameError等）は検出できない。"""
+def check_file(md_path: Path, blocks: list[Block], deep: bool) -> int:
+    """描画できるかどうかを確かめる（SVG・mdは書き換えない）。
+
+    以前は構文チェックだけで `[OK]` を出していたため、実行時にしか出ない
+    AttributeError 等を抱えたまま「検証済み」と誤認される事故が起きた。
+    schemdrawが使える環境では実際に描画まで通し、使えない環境では
+    「構文のみ」と明示して、`[OK]` の意味を取り違えられないようにする。
+    """
     errors = 0
     for block in blocks:
-        src, _ = transform(block.code)
-        compile_name = f"<{md_path.name}#block{block.index}>"
-        try:
-            compile(src, compile_name, "exec")
-        except SyntaxError as exc:
-            errors += 1
-            print(block_error_report(md_path, block, exc, compile_name))
-            continue
-        dsl_errors, dsl_warns = lint_dsl_text(block.code)
-        if dsl_errors:
-            errors += 1
-            head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜) 内 "
+        head = f"[NG] {md_path} ブロック{block.index} (md {block.fence_start + 1}行目〜)"
+        if not deep:
+            src, _ = transform(block.code)
+            compile_name = f"<{md_path.name}#block{block.index}>"
+            try:
+                compile(src, compile_name, "exec")
+            except SyntaxError as exc:
+                errors += 1
+                print(block_error_report(md_path, block, exc, compile_name))
+                continue
+            dsl_errors, dsl_warns = lint_dsl_text(block.code)
             for e in dsl_errors:
-                print(head + e)
-        else:
-            print(f"[OK] {md_path} ブロック{block.index}")
-        for w in dsl_warns:
+                errors += 1
+                print(f"{head} 内 {e}")
+            if not dsl_errors:
+                print(f"[OK] {md_path} ブロック{block.index}"
+                      "（構文のみ・描画は未検証。schemdrawを入れると描画まで確認します）")
+            for w in dsl_warns:
+                print(f"  [警告] ブロック{block.index}: {w}")
+            continue
+
+        try:
+            _svg, warns = render_source("\n".join(block.code))
+        except CircuitError as exc:
+            errors += 1
+            print(f"{head}: {exc}")
+            continue
+        except Exception as exc:  # ツール側の想定外。握りつぶすと誤った[OK]になる
+            errors += 1
+            print(f"{head}: {type(exc).__name__}: {exc}")
+            continue
+        print(f"[OK] {md_path} ブロック{block.index}（描画まで確認）")
+        for w in warns:
             print(f"  [警告] ブロック{block.index}: {w}")
     return errors
 
@@ -975,7 +1064,7 @@ def process_file(md_path: Path, check_only: bool, base_ns: dict | None) -> int:
     if not blocks:
         return 0
     if check_only:
-        return check_file(md_path, blocks)
+        return check_file(md_path, blocks, deep=base_ns is not None)
 
     errors = 0
     keep: set[str] = set()
@@ -1086,7 +1175,8 @@ def render_source(code_text: str) -> tuple[str, list[str]]:
                     lineno = frame.lineno
         msg = f"{type(exc).__name__}: {exc}"
         if lineno is not None and 1 <= lineno <= len(code_lines):
-            msg = diagnose_line(code_lines[lineno - 1]) or msg
+            line = code_lines[lineno - 1]
+            msg = diagnose_exception(exc, line) or diagnose_line(line) or msg
         if lineno is not None:
             msg = f"{lineno}行目: {msg}"
             if 1 <= lineno <= len(code_lines):
@@ -1139,7 +1229,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in [
         ("render", "SVGを生成してmdに画像リンクを挿入"),
-        ("check", "構文チェックのみ（SVG生成・md書換なし）"),
+        ("check", "描画できるか確認（SVG生成・md書換なし）"),
     ]:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("files", nargs="*", help="対象のmdファイル")
@@ -1152,7 +1242,14 @@ def main():
         return
     targets = collect_targets(args)
     check_only = args.command == "check"
-    base_ns = None if check_only else load_schemdraw()
+    if check_only:
+        # schemdrawが無くても構文チェックだけは通す（その旨は[OK]に明記される）
+        try:
+            base_ns = load_schemdraw()
+        except Exception:
+            base_ns = None
+    else:
+        base_ns = load_schemdraw()
 
     errors = sum(process_file(p, check_only, base_ns) for p in targets)
     if errors:

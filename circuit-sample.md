@@ -121,3 +121,40 @@ jy = c1tap.center.y
 </details>
 
 ![非安定マルチバイブレーター（LED交互点滅）](circuits/circuit-sample-4-67064b95.svg)<!-- circuit:auto -->
+
+## 5. IC（NE555 単安定回路）— `elm.Ic` の使い方
+
+ICはDSLに無いので素のschemdrawで書く。**`d.add()` で図に追加して変数で受ける**のが要点で、
+これを忘れるとアンカーが生えず `AttributeError: OUT not defined in Element` になる。
+追加さえすれば、以降のDSL行から `@IC1.OUT` のように普通に参照できる。
+
+<details><summary>回路コード</summary>
+
+```circuit
+title: NE555 単安定回路
+IC1 = d.add(elm.Ic(pins=[
+    elm.IcPin(name='TRIG', side='left'),
+    elm.IcPin(name='OUT', side='left'),
+    elm.IcPin(name='DISCH', side='right'),
+    elm.IcPin(name='THRES', side='right'),
+], pinspacing=1.5, label='IC1: NE555', lblloc='top').at((0,0)))
+
+# 右側: THRES と DISCH を束ね、R・C でタイミングを作る
+線 → @IC1.THRES len=1.2
+点:t_up
+線 → @IC1.DISCH len=1.2
+点:t_dn
+線 ↓ @t_up.center toy=@t_dn.center
+抵抗 R1 8.2kΩ ↑ @t_up.center len=2 loc=右
+VDD 5V
+コンデンサ C1 0.1µF ↓ @t_dn.center len=2 loc=右
+GND
+
+# 左側: トリガ入力と出力
+線 TRIG_IN ← @IC1.TRIG len=1.5 loc=下
+線 OUT ← @IC1.OUT len=1.5 loc=上
+```
+
+</details>
+
+![NE555 単安定回路](circuits/circuit-sample-5-bf1df759.svg)<!-- circuit:auto -->

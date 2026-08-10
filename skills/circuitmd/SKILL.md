@@ -109,6 +109,35 @@ GND
 - **ツェナー/TVSを `↓`（レール→GND）で描くとカソードがGND側**になる（保護素子として逆向き）
   → `rev` を付けてカソードを電源側にする
 
+## IC（elm.Ic）の書き方
+
+DSLにICは無いので素のschemdrawで書く。ここは踏み外しが多いので定型を守ること。
+
+```circuit
+# ① 必ず d.add() で図に追加し、戻り値を変数で受ける
+IC1 = d.add(elm.Ic(pins=[
+    elm.IcPin(name='TRIG', side='left'),
+    elm.IcPin(name='OUT', side='left'),
+    elm.IcPin(name='DISCH', side='right'),
+    elm.IcPin(name='THRES', side='right'),
+], pinspacing=1.5, label='IC1: NE555', lblloc='top').at((0,0)))
+
+# ② アンカーは @変数.ピン名 で参照する（DSL行でもそのまま使える）
+抵抗 R1 1kΩ ↑ @IC1.DISCH len=2 loc=右
+```
+
+- **`IC1 = elm.Ic(...)` だけでは図に追加されない**。追加していない素子はアンカーを持たず、
+  `@IC1.DISCH` は `AttributeError: DISCH not defined in Element` になる。
+  `anchorname=` の追加や `setattr()` は解決にならない（アンカー管理を壊すだけ）
+- **`.anchor('DISCH')` は座標を返さない**。「どのアンカーを基準に置くか」を設定して
+  素子自身を返すメソッドなので、`.at(IC1.anchor('DISCH'))` は素子を座標として渡す誤り
+- **座標が要る場所には必ずアンカーまで書く**。`@P1`（点）ではなく `@P1.center`、
+  `@R1` ではなく `@R1.end`。素子そのものを渡すと `KeyError: 0/1` になる
+- ピン名が `V+` や `2` のようにPythonの識別子として書けないときだけ
+  `IC1.absanchors['V+']` を使う
+- 同じ辺に3つ以上ピン名が並ぶなら `pinspacing=1.5` 等で広げる（`w=`/`h=` では広がらない）。
+  表示不要なピンは `name='', anchorname='EP'`
+
 ## AIの作業手順（必ず守る）
 
 1. 回路をフェンスに書く（接続関係の一文をフェンス前のプレーンテキストにも添える）
@@ -117,6 +146,11 @@ GND
      （claude.aiアップロード用zip等）。symlink導入なら
      `"$(readlink -f ~/.claude/skills/circuitmd)/../../circuitmd.py"` がリポジトリ内の本体。
      いずれも無ければ `git clone https://github.com/Duino-nano/circuitmd`（要 `pip install schemdraw`）
+   - 描けるかどうかだけ確かめたい時は `circuitmd.py check <file.md>`（SVGもmdも書き換えない）。
+     **`[OK] …（描画まで確認）` と出て初めて描画成功**。`（構文のみ・描画は未検証）` と
+     出た場合は schemdraw が入っておらず、実行時エラーは検出できていない
+   - **render/check が [NG] のまま完了報告しない**。失敗したブロックは画像リンクの代わりに
+     `> ⚠️ 回路図を生成できませんでした` の行がmdに書き込まれるので、これが残っていたら未完成
 3. **PNG化して必ず目視検証してから納品する**（macOSの例。qlmanageは横長図を
    正方形クロップするので使わない）:
    ```bash

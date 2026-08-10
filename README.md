@@ -132,6 +132,14 @@ Actionがクラウドでレンダリングし、SVGと画像リンクを自動�
   代入（VCC = 電源 …）は書けない。表示したくない名前は 電源:VCC のように 部品:変数名 で付ける
 【1端子素子】GND / VDD / VCC / 点 / トランジスタ / オペアンプ は始点と終点を持たないので
   len= to= tox= toy= が使えない。長さが要る区間は 線 を使い、位置は @座標 かアンカーで決める
+【アンカー】座標が要る場所は必ずアンカーまで書く。@P1（点）ではなく @P1.center、
+  @R1 ではなく @R1.end。素子そのものを渡すと KeyError: 0/1 になる
+【IC】DSLにICは無いので素のschemdrawで書く。必ず d.add() で図に追加して変数で受ける:
+  IC1 = d.add(elm.Ic(pins=[elm.IcPin(name='OUT', side='right')],
+      pinspacing=1.5, label='IC1: NE555', lblloc='top').at((0,0)))
+  以降 @IC1.OUT で参照できる。d.add() を忘れるとアンカーが生えず
+  「AttributeError: OUT not defined in Element」になる（anchorname= や setattr では直らない）。
+  .anchor('OUT') は座標を返さない（基準アンカーを設定して素子自身を返すメソッド）
 【分岐】分岐 … 合流 で枝を描く。分岐点には「点」を打つ
 【オプション】loc=下（ラベル位置） len=1.5（長さ） tox=@X.end toy=@Y.end to=@X.end
   ofst=0.4（ラベルを線から離す） rev（左右反転） flip（上下反転）
