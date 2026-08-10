@@ -75,7 +75,9 @@ GND
 - ラベルの単位はΩ・µなどUnicode直書き（`$...$` のLaTeX記法は不可）
 - **ラベル内に単独の `→ ← ↑ ↓` を書かない**（方向指定として解釈される）。
   矢印付き文字列は `VOUT→LOAD` のように空白なしで書く
-- **配線は斜めにしない**。接続先の座標を揃え `tox=`/`toy=` で直交させる（斜めだと警告が出る）
+- **配線は水平か垂直だけ**。斜めの配線は**エラー**（`# allow-diagonal` でも通らない）。
+  曲がるときは `線 ↓ toy=@X.end` → `線 → tox=@X.end` と2本に分けて直角に折る。
+  ブリッジ整流のひし形は手で組まず `elm.Rectifier()` を使う
 - **素のschemdraw記法（Python）と行単位で混在可**: `elm.` で始まる行は自動で `d += ` が付く。
   `q1 = d.add(elm.BjtNpn(circle=True).anchor('base').at((0,0)))` のような行もそのまま書ける。
   IC定義は `elm.Ic(pins=[elm.IcPin(name='OUT', side='right'), ...])`

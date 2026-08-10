@@ -330,6 +330,10 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
         return "d.pop()"
 
     head, _, name = tokens[0].partition(":")
+    if head in RESERVED_NAMES:
+        # `d += elm.Line()` の d が「D＝ダイオード」に化けるのを防ぐ。
+        # 予約名で始まる行は素のPythonとして扱う（大文字の `D D1 →` は従来どおりDSL）
+        return None
     comp = (
         DSL_COMPONENTS.get(head)
         or DSL_COMPONENTS.get(head.upper())
@@ -1158,6 +1162,10 @@ class CircuitError(Exception):
 
 
 ALLOW_DIAGONAL_RE = re.compile(r"^#\s*allow-diagonal\b")
+# 斜めであることが正しい要素（円弧・注釈）。直交チェックの対象外
+DIAGONAL_EXEMPT = ("Arc", "Annotate", "LoopArrow", "LoopCurrent", "Antenna")
+# 配線として扱う要素。これらが斜めなら常にエラー
+DIAGONAL_WIRES = {"Line", "Arrow", "LineDot", "Wire"}
 
 
 def _element_name(el) -> str:
@@ -1180,21 +1188,30 @@ def lint_drawing(d, allow_diagonal: bool = False) -> tuple[list[str], list[str]]
     斜めの配線は座標ずれの兆候ではあるが、意図的な場合もあるので警告に留める。
     """
     parts: list[str] = []
-    wires = 0
+    wires: list[str] = []
     for el in getattr(d, "elements", []):
+        name = type(el).__name__
+        if name.startswith(DIAGONAL_EXEMPT):
+            continue  # 円弧・注釈は曲がっているのが正しい
         anchors = getattr(el, "absanchors", {}) or {}
         start, end = anchors.get("start"), anchors.get("end")
         if start is None or end is None:
             continue  # start/end を持たない素子（トランジスタ・IC等）は対象外
         if abs(start[0] - end[0]) <= 0.05 or abs(start[1] - end[1]) <= 0.05:
             continue
-        if type(el).__name__ == "Line":
-            wires += 1
-        else:
-            parts.append(_element_name(el))
+        (wires if name in DIAGONAL_WIRES else parts).append(_element_name(el))
 
     errors: list[str] = []
     warns: list[str] = []
+    if wires:
+        # 配線が斜めになる正当な理由は無い（ひし形ブリッジは素子側が斜めになるだけで、
+        # 角へ引く配線は直交する）。よって # allow-diagonal でも抑止しない
+        errors.append(
+            f"配線{len(wires)}本が斜めです（{'・'.join(wires)}）。"
+            "配線は水平か垂直だけで引いてください。曲がる必要があるときは "
+            "`線 ↓ toy=@X.end` → `線 → tox=@X.end` のように2本に分けて直角に折ります"
+            "（`# allow-diagonal` でも配線の斜めは許容されません）"
+        )
     if parts and allow_diagonal:
         # 抑止していることは必ず見える形にする。エスカレーションの逃げ道として
         # `# allow-diagonal` を書かれると、崩れた図がそのまま通ってしまうため
@@ -1211,11 +1228,6 @@ def lint_drawing(d, allow_diagonal: bool = False) -> tuple[list[str], list[str]]
             "離れた点へは 線 と tox=/toy= で直交させて届かせてください"
             "（例: 抵抗 R1 1kΩ ↑ @Q1.drain len=2.5 → 線 → @R1.end tox=@R2.end）。"
             "意図的に斜めへ置く場合はフェンス内に # allow-diagonal を書いてください"
-        )
-    if wires and not allow_diagonal:
-        warns.append(
-            f"斜めの配線が{wires}本あります。接続先の座標がずれている可能性があります"
-            "（tox=/toy= で直交させてください）"
         )
     return errors, warns
 
