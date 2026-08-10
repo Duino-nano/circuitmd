@@ -228,6 +228,14 @@ def _diagnose_dsl(
             "（長さや終点を指定できるのは抵抗・コンデンサ・線などの2端子素子だけです）。"
             "位置は @座標 やアンカー参照（@Q1.gate）で決め、長さが要る区間は `線` を使ってください",
         ))
+    if has_direction and "to" in span_opts:
+        diag.append((
+            "error",
+            "方向（→←↑↓）と to= は同時に指定できません。to= は終点を直接決めるので"
+            "方向は無視され、始点と終点が揃っていなければ素子が斜めになります。"
+            "「向きと長さで置く」なら 方向＋len=、「決まった2点に渡す」なら to= だけを使い、"
+            "離れた点へは 線 と tox=/toy= で直交させて届かせてください",
+        ))
     if n_at > 1:
         diag.append((
             "error",
@@ -404,6 +412,60 @@ def translate_dsl(line: str, diag: list[tuple[str, str]] | None = None) -> str |
 # 素のschemdraw行でよくある取り違え
 ELEM_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(?:elm|logic|flow|dsp)\.")
 ANCHOR_AS_POINT_RE = re.compile(r"\.(?:at|to|tox|toy)\([^)]*\.anchor\(")
+# 配置は d.add() の時点で確定するので、これらを後から呼んでも図は動かない
+PLACEMENT_METHODS = (
+    "at", "to", "tox", "toy", "up", "down", "left", "right",
+    "length", "anchor", "reverse", "flip", "theta",
+)
+POST_ADD_RE = re.compile(r"^\s*\.(\w+)\(")
+PIN_SIDE_RE = re.compile(r"side\s*=\s*['\"](left|right|top|bottom)['\"]")
+
+
+def _call_spans(text: str, needle: str) -> list[tuple[int, int]]:
+    """`needle(` の開き括弧に対応する閉じ括弧までの (開始, 閉じ括弧) を列挙する。"""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while (j := text.find(needle, i)) >= 0:
+        depth = 0
+        for pos in range(j + len(needle) - 1, len(text)):
+            if text[pos] == "(":
+                depth += 1
+            elif text[pos] == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((j, pos))
+                    break
+        i = j + 1
+    return spans
+
+
+def lint_raw_schemdraw(text: str) -> list[str]:
+    """素のschemdraw記述にありがちな「黙って効かない」書き方を洗い出す。"""
+    errors: list[str] = []
+    for start, end in _call_spans(text, "d.add("):
+        line_no = text.count("\n", 0, start) + 1
+        m = POST_ADD_RE.match(text[end + 1 :])
+        if m and m.group(1) in PLACEMENT_METHODS:
+            errors.append(
+                f"{line_no}行目付近: `d.add(...).{m.group(1)}(...)` は効きません。"
+                "配置は d.add() した時点で確定するので、後から呼んでも素子は動かず、"
+                "直前のカーソル位置に置かれたままになります（エラーにならないので気づけません）。"
+                f"`d.add(elm.Ic(...).{m.group(1)}(...))` のように括弧の内側に入れてください"
+            )
+    for start, end in _call_spans(text, "elm.Ic("):
+        body = text[start : end + 1]
+        line_no = text.count("\n", 0, start) + 1
+        if "pinspacing" in body:
+            continue
+        sides = PIN_SIDE_RE.findall(body)
+        crowded = [s for s in set(sides) if sides.count(s) >= 3]
+        if crowded:
+            errors.append(
+                f"{line_no}行目付近: elm.Ic の {' / '.join(sorted(crowded))} 側にピンが3つ以上あります。"
+                "既定のピン間隔ではピン名が重なるので `pinspacing=1.5` 等を指定してください"
+                "（`w=`/`h=` を広げても間隔は変わりません）"
+            )
+    return errors
 
 
 def lint_dsl_text(code_lines: list[str]) -> tuple[list[str], list[str]]:
@@ -437,6 +499,7 @@ def lint_dsl_text(code_lines: list[str]) -> tuple[list[str], list[str]]:
                     f"アンカー（`@{var}.OUT` など）も参照できません。"
                     f"`{var} = d.add(elm....)` と書いてください"
                 )
+    errors += lint_raw_schemdraw(text)
     return errors, warns
 
 
@@ -1132,6 +1195,14 @@ def lint_drawing(d, allow_diagonal: bool = False) -> tuple[list[str], list[str]]
 
     errors: list[str] = []
     warns: list[str] = []
+    if parts and allow_diagonal:
+        # 抑止していることは必ず見える形にする。エスカレーションの逃げ道として
+        # `# allow-diagonal` を書かれると、崩れた図がそのまま通ってしまうため
+        warns.append(
+            f"# allow-diagonal により、斜めに置かれた素子{len(parts)}個"
+            f"（{'・'.join(parts)}）を許容しました。意図した斜め配置でなければ、"
+            "この行を消して素子を 方向＋len= で置き直してください"
+        )
     if parts and not allow_diagonal:
         errors.append(
             f"{'・'.join(parts)} が斜めに置かれています。"

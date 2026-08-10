@@ -165,7 +165,8 @@ const AI_PROMPT = `あなたは回路図を「circuitmd記法」で書きます�
   FET: gate/drain/source、2端子素子: start/end）。座標指定は @(2,1.5)（スペース禁止）。
   @ は「素子を置く起点」で1行に1つだけ（2つ書くとエラー）
 【to=】@始点 to=@終点 は始点と終点のXかYが揃っているときだけ使える（揃っていないと
-  素子が斜めになりエラー）。揃っていない2点は 線 と tox=/toy= で曲げてつなぐ
+  素子が斜めになりエラー）。揃っていない2点は 線 と tox=/toy= で曲げてつなぐ。
+  方向（→←↑↓）と to= の併用は禁止（矛盾する。方向＋len= か to= のどちらか一方）
 【変数】先頭ラベルが英数字名なら変数になる（NPN Q1 → @Q1.base で参照）。
   代入（VCC = 電源 …）は書けない。表示したくない名前は 電源:VCC のように 部品:変数名 で付ける
 【1端子素子】GND / VDD / VCC / 点 / トランジスタ / オペアンプ は始点と終点を持たないので
@@ -175,6 +176,8 @@ const AI_PROMPT = `あなたは回路図を「circuitmd記法」で書きます�
 【IC】DSLにICは無いので素のschemdrawで書く。必ず d.add() で図に追加して変数で受ける:
   IC1 = d.add(elm.Ic(pins=[elm.IcPin(name='OUT', side='right')],
       pinspacing=1.5, label='IC1: NE555', lblloc='top').at((0,0)))
+  .at() は必ず d.add() の内側に書く（外に書くと黙って無視され、素子が
+  直前のカーソル位置に取り残される）。同じ辺のピンが3つ以上なら pinspacing=1.5 も必須。
   以降 @IC1.OUT で参照できる。d.add() を忘れるとアンカーが生えず
   「AttributeError: OUT not defined in Element」になる（anchorname= や setattr では直らない）。
   .anchor('OUT') は座標を返さない（基準アンカーを設定して素子自身を返すメソッド）
