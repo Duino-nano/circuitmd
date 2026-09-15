@@ -1,0 +1,31 @@
+# pip でインストールできるようにするための定義。
+# circuitmd.py はリポジトリ直下の単一ファイルなので、py-modules で 1 モジュールだけを配布する
+# (circuit-preview-ext/ や docs/ は同梱しない)。
+#
+# 利用側（例: 別プロジェクトの pyproject.toml）:
+#   dependencies = ["circuitmd @ git+https://github.com/Duino-nano/circuitmd.git"]
+# コードからは次の 1 関数だけ使えばよい:
+#   from circuitmd import render_source, CircuitError
+#   svg, warnings = render_source(フェンス内のテキスト)
+
+[project]
+name = "circuitmd"
+version = "0.1.0"
+description = "Markdown の ```circuit フェンスを schemdraw で回路図SVGにするツール"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["schemdraw>=0.19"]
+
+[project.urls]
+Homepage = "https://github.com/Duino-nano/circuitmd"
+
+[project.scripts]
+circuitmd = "circuitmd:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["circuitmd"]
